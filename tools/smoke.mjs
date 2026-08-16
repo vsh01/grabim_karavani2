@@ -143,6 +143,99 @@ async function main() {
     `→ панорама леса: ${panorama.forest.impostors} деревьев картинками, ${panorama.forest.lod1} моделями поодаль`,
   );
 
+  // ── Бой и увечья ──────────────────────────────────────────────────────────
+  // Ставим противников перед игроком, рубим их топором и смотрим, что руки и
+  // ноги действительно отлетают, а трупы остаются лежать.
+  await page.evaluate(() => {
+    window.__game.teleport(-455, 92);
+    window.__game.look(0.6, -0.04);
+    window.__game.give('axe', 1, true);
+  });
+  await page.waitForTimeout(900);
+
+  const enemyIds = await page.evaluate(() => [
+    window.__game.spawnEnemy(2.3, 'palace', 'sword'),
+    window.__game.spawnEnemy(3.4, 'palace', 'mace'),
+  ]);
+  await page.waitForTimeout(700);
+  await page.screenshot({ path: join(outDir, 'combat-before.png') });
+
+  // Целимся в руку и рубим именно её: это и есть обещанное «отрубить руку».
+  for (let i = 0; i < 14; i++) {
+    await page.evaluate((id) => {
+      window.__game.aimAt(id, 'rightArm');
+      window.__game.attack();
+    }, enemyIds[0]);
+    await page.waitForTimeout(230);
+  }
+
+  const afterArm = await page.evaluate(() => window.__game.population());
+  console.log(`→ после ударов по руке отрублено конечностей: ${afterArm.severedLimbs}`);
+  if (afterArm.severedLimbs === 0) {
+    failures.push('прицельные удары топором по руке не отрубили её');
+  }
+  await page.screenshot({ path: join(outDir, 'combat-severed.png') });
+
+  // Теперь добиваем: бьём куда придётся.
+  for (let i = 0; i < 18; i++) {
+    await page.evaluate((ids) => {
+      window.__game.aimAt(ids[Math.floor(Date.now() / 500) % ids.length], 'torso');
+      window.__game.attack();
+    }, enemyIds);
+    await page.waitForTimeout(230);
+  }
+  await page.waitForTimeout(900);
+
+  const battle = await page.evaluate(() => window.__game.population());
+  console.log(
+    `→ бой: живых ${battle.alive}, трупов ${battle.corpses}, отрублено конечностей ${battle.severedLimbs}`,
+  );
+  await page.screenshot({ path: join(outDir, 'combat-after.png') });
+
+  if (battle.severedLimbs === 0 && battle.corpses === 0) {
+    failures.push('после двух десятков ударов топором никто не пострадал — бой не работает');
+  }
+
+  // ── Увечья игрока ─────────────────────────────────────────────────────────
+  // Выбиваем глаз: половина экрана должна погаснуть.
+  await page.evaluate(() => {
+    window.__game.hurt('leftEye', 40, 'pierce');
+  });
+  await page.waitForTimeout(900);
+  await page.screenshot({ path: join(outDir, 'injury-eye.png') });
+
+  const oneEyed = await page.evaluate(() => window.__game.player());
+  console.log(`→ после удара в глаз: обзор «${oneEyed.visionLoss}», раны — ${oneEyed.injuries.join(', ')}`);
+  if (oneEyed.visionLoss !== 'left') failures.push('выбитый левый глаз не погасил левую половину обзора');
+
+  // Отрубаем ногу: игрок должен перейти на ползание и начать истекать кровью.
+  await page.evaluate(() => {
+    window.__game.hurt('rightLeg', 200, 'cut');
+  });
+  await page.waitForTimeout(1400);
+  await page.screenshot({ path: join(outDir, 'injury-crawl.png') });
+
+  const crippled = await page.evaluate(() => window.__game.player());
+  console.log(
+    `→ без ноги: передвижение «${crippled.movementMode}», кровотечение ${crippled.bleeding ? 'есть' : 'нет'}, ` +
+      `до потери сознания ${Math.round(crippled.secondsUntilBleedOut)} с`,
+  );
+  if (crippled.movementMode !== 'crawl') failures.push('после потери ноги игрок не перешёл на ползание');
+  if (!crippled.bleeding) failures.push('отрубленная нога не кровоточит');
+
+  // Перевязка должна спасти. Одна повязка закрывает одну рану, поэтому
+  // перевязываемся, пока кровь не остановится совсем.
+  for (let i = 0; i < 4; i++) {
+    await page.evaluate(() => window.__game.bandage());
+    await page.waitForTimeout(200);
+  }
+  const bandaged = await page.evaluate(() => window.__game.player());
+  if (bandaged.bleeding) failures.push('перевязка не остановила кровь');
+  console.log(
+    `→ после перевязки кровотечение ${bandaged.bleeding ? 'осталось' : 'остановлено'}, ` +
+      `бинтов в мешке ${bandaged.bandages}`,
+  );
+
   // Ночной кадр — заодно проверяем, что смена суток не роняет шейдеры.
   await page.evaluate(() => {
     window.__game.teleport(-470, 40);

@@ -5,38 +5,13 @@ import type { Terrain } from '../world/terrain';
 import { WATER_LEVEL } from '../world/terrain';
 import type { Forest } from '../world/forest';
 import { type CharacterBody, type CollisionWorld, moveCharacter } from '../systems/physics';
+import { MOVEMENT_PARAMS, MovementMode, type MovementParams } from './movement';
+import { Body, type BodyPart } from './body';
+import { createColliderBuffer, raycastColliders, roughlyIntersects, updateColliderPositions } from './hitbox';
+import { Inventory } from '../data/items';
+import { Faction } from '../data/factions';
 
-/**
- * Способ передвижения. Меняется не по желанию игрока, а по состоянию ног:
- * потерял ногу — ползёшь, купил коляску — катишься, поставил протез — ходишь.
- */
-export enum MovementMode {
-  /** Обе ноги на месте. */
-  Normal = 'normal',
-  /** Протез вместо ноги: ходить можно, бегать нет. */
-  Prosthetic = 'prosthetic',
-  /** Ноги нет и протеза нет — только ползком. */
-  Crawl = 'crawl',
-  /** Коляска: по ровному быстро, по склонам и лесу почти никак. */
-  Wheelchair = 'wheelchair',
-}
-
-interface ModeParams {
-  walk: number;
-  sprint: number;
-  eyeHeight: number;
-  jump: number;
-  canJump: boolean;
-  /** Насколько сильно уклон режет скорость. */
-  slopePenalty: number;
-}
-
-const MODE_PARAMS: Record<MovementMode, ModeParams> = {
-  [MovementMode.Normal]: { walk: 4.7, sprint: 7.8, eyeHeight: 1.68, jump: 7.2, canJump: true, slopePenalty: 0.9 },
-  [MovementMode.Prosthetic]: { walk: 3.8, sprint: 3.8, eyeHeight: 1.64, jump: 4.4, canJump: true, slopePenalty: 1.3 },
-  [MovementMode.Crawl]: { walk: 0.85, sprint: 0.85, eyeHeight: 0.5, jump: 0, canJump: false, slopePenalty: 1.6 },
-  [MovementMode.Wheelchair]: { walk: 3.4, sprint: 4.6, eyeHeight: 1.15, jump: 0, canJump: false, slopePenalty: 3.4 },
-};
+export { MovementMode } from './movement';
 
 export interface PlayerWorld {
   terrain: Terrain;
@@ -44,10 +19,26 @@ export interface PlayerWorld {
   colliders?: CollisionWorld;
 }
 
-/** Игрок: тело, камера от первого лица и управление. */
+export interface PlayerHit {
+  part: BodyPart;
+  distance: number;
+  point: THREE.Vector3;
+}
+
+/** Игрок: тело, раны, мешок, камера от первого лица и управление. */
 export class Player {
   readonly camera: THREE.PerspectiveCamera;
   readonly body: CharacterBody;
+  /** Раны игрока: те же правила, что и у врагов. */
+  readonly wounds = new Body(1.15);
+  readonly inventory = new Inventory();
+  /** За кого играем. Задаётся при создании персонажа. */
+  faction: Faction = Faction.Elves;
+  /** Имя злодея игрок придумывает сам — по умолчанию Безымянный. */
+  characterName = 'Безымянный';
+
+  private readonly colliderWorld = createColliderBuffer();
+  private colliderFrame = -1;
 
   /** Поворот вокруг вертикали, радианы. */
   yaw = 0;
@@ -68,7 +59,7 @@ export class Player {
   private readonly forward = new THREE.Vector3();
   private readonly right = new THREE.Vector3();
   private readonly axis = { x: 0, z: 0 };
-  private eyeOffset = MODE_PARAMS[MovementMode.Normal].eyeHeight;
+  private eyeOffset = MOVEMENT_PARAMS[MovementMode.Normal].eyeHeight;
 
   constructor(x = 0, z = 0, terrain?: Terrain) {
     this.camera = new THREE.PerspectiveCamera(78, 1, 0.1, 2200);
@@ -89,8 +80,8 @@ export class Player {
     return this.body.position;
   }
 
-  get params(): ModeParams {
-    return MODE_PARAMS[this.mode];
+  get params(): MovementParams {
+    return MOVEMENT_PARAMS[this.mode];
   }
 
   /** Направление взгляда в горизонтальной плоскости. */
@@ -114,7 +105,37 @@ export class Player {
     this.body.velocity.set(0, 0, 0);
   }
 
+  /**
+   * Проверить, попал ли луч по игроку, и в какую часть тела.
+   * Ползущий игрок ниже — попасть по нему из лука труднее.
+   */
+  raycast(origin: THREE.Vector3, direction: THREE.Vector3, maxDistance: number, frame: number): PlayerHit | null {
+    if (!roughlyIntersects(this.body.position, origin, direction, maxDistance)) return null;
+
+    if (this.colliderFrame !== frame) {
+      this.colliderFrame = frame;
+      const crouch = this.mode === MovementMode.Crawl ? 0.32 : 1;
+      updateColliderPositions(this.body.position, this.yaw, crouch, this.colliderWorld);
+    }
+
+    return raycastColliders(this.colliderWorld, this.wounds, origin, direction, maxDistance);
+  }
+
+  /**
+   * Привести способ передвижения и скорость в соответствие с ранами.
+   * Отсюда и берётся «либо умрёшь, либо будешь ползать, либо коляска, либо
+   * протез»: игрок ничего не переключает — это делает состояние ног.
+   */
+  syncWithWounds(): void {
+    this.mode = this.wounds.movementMode;
+    this.speedMultiplier = this.wounds.speedMultiplier;
+    this.controlEnabled = this.wounds.alive;
+  }
+
   update(dt: number, input: Input, world: PlayerWorld): void {
+    this.wounds.tick(dt);
+    this.syncWithWounds();
+
     if (this.controlEnabled) {
       this.applyLook(input);
       this.applyMovement(dt, input, world);

@@ -1,5 +1,7 @@
 import { Game } from './game';
 import { ZONES, Zone, zoneAt } from './world/zones';
+import { Faction } from './data/factions';
+import type { BodyPart } from './entities/body';
 
 /** Сид мира. Одно число — и весь ландшафт, лес и постройки те же самые. */
 const WORLD_SEED = 20260816;
@@ -64,6 +66,33 @@ async function main(): Promise<void> {
       setTimeOfDay(time: number): void {
         game.sky.time = time;
         game.sky.update(0);
+      },
+      spawnEnemy(distance: number, faction: Faction = Faction.Palace, weapon = 'sword'): number {
+        return game.spawnEnemyAhead(distance, faction, weapon).id;
+      },
+      attack(): void {
+        game.debugAttack();
+      },
+      aimAt(actorId: number, part: BodyPart): boolean {
+        return game.debugAimAt(actorId, part);
+      },
+      bandage(): void {
+        game.debugBandage();
+      },
+      loot(): void {
+        game.debugInteract();
+      },
+      give(id: string, count = 1, equip = false): void {
+        game.debugGive(id, count, equip);
+      },
+      hurt(part: BodyPart, amount: number, type: 'cut' | 'blunt' | 'pierce' = 'cut'): void {
+        game.debugHurtPlayer(part, amount, type);
+      },
+      player() {
+        return game.playerReport();
+      },
+      population() {
+        return game.populationReport();
       },
       stats() {
         const position = game.player.position;

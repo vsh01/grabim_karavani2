@@ -16,6 +16,8 @@ export interface DebugStats {
   totalTrees: number;
   drawCalls: number;
   triangles: number;
+  actors: number;
+  corpses: number;
 }
 
 export class DebugHud {
@@ -63,6 +65,9 @@ export class DebugHud {
       `деревья 3D  ${stats.lod0} вблизи / ${stats.lod1} поодаль`,
       `картинками  ${stats.impostors}`,
       `всего в мире ${stats.totalTrees}`,
+      '',
+      `живых       ${stats.actors}`,
+      `трупов      ${stats.corpses}`,
       '',
       `вызовов     ${stats.drawCalls}`,
       `треугольников ${(stats.triangles / 1000).toFixed(0)}k`,
