@@ -1,0 +1,23 @@
+{
+  "name": "grabim-karavani-2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Грабим Корованы 2 — трёхмерный экшен про эльфов, охрану дворца и злодея",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4173",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  },
+  "devDependencies": {
+    "@types/three": "^0.185.4",
+    "typescript": "~5.9.3",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10"
+  }
+}
