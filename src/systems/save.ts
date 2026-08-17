@@ -3,6 +3,7 @@ import type { InventorySnapshot } from '../data/items';
 import type { QuestSnapshot } from './quests';
 import type { ReputationSnapshot } from './reputation';
 import type { EconomySnapshot } from './economy';
+import type { BountySnapshot } from './bounty';
 import type { ActorRole } from '../entities/actor';
 import { Faction } from '../data/factions';
 
@@ -14,8 +15,12 @@ import { Faction } from '../data/factions';
  * раны, обозы, цены и отношения. Снимок получается лёгким и читаемым.
  */
 
-/** Версия формата. Меняется, когда снимок перестаёт читаться по-старому. */
-export const SAVE_VERSION = 1;
+/**
+ * Версия формата. Меняется, когда снимок перестаёт читаться по-старому.
+ *
+ * 2 — появилась награда за голову.
+ */
+export const SAVE_VERSION = 2;
 const STORAGE_PREFIX = 'grabim-korovany-2/save/';
 export const SAVE_SLOTS = 3;
 
@@ -35,6 +40,8 @@ export interface ActorSnapshot {
   shopSiteId: string | null;
   commandsFaction: Faction | null;
   inPlayerSquad: boolean;
+  /** Снимки первой версии этого не знают, поэтому поле необязательное. */
+  huntsPlayer?: boolean;
   corpseAge: number;
 }
 
@@ -73,6 +80,8 @@ export interface SaveGame {
   reputation: ReputationSnapshot;
   quests: QuestSnapshot;
   economy: EconomySnapshot;
+  /** Награда за голову по каждой стороне. Появилась во второй версии формата. */
+  bounty: BountySnapshot;
   actors: ActorSnapshot[];
   caravans: CaravanSnapshot[];
 }
@@ -133,8 +142,8 @@ export function listSlots(): SlotInfo[] {
 
 /**
  * Привести старый снимок к текущему виду.
- * Пока версия одна, но крючок нужен сразу: ломать чужие сохранения обновлением —
- * худшее, что можно сделать.
+ * Ломать чужие сохранения обновлением — худшее, что можно сделать, поэтому
+ * недостающие поля не отвергаются, а заполняются разумными значениями.
  */
 export function migrate(save: SaveGame): SaveGame | null {
   if (typeof save !== 'object' || save === null) return null;
@@ -142,6 +151,12 @@ export function migrate(save: SaveGame): SaveGame | null {
     console.warn('[сохранение] снимок из более новой версии игры');
     return null;
   }
+
+  // Версия 1 ничего не знала про награду за голову: в том мире её просто не
+  // было, значит, никто никого и не ищет.
+  if (!save.bounty || typeof save.bounty !== 'object') save.bounty = { values: {} };
+
+  save.version = SAVE_VERSION;
   return save;
 }
 

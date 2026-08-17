@@ -37,6 +37,22 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
+/**
+ * Снимок без заставки.
+ *
+ * Заставка «Нажмите, чтобы играть» возвращается каждый раз, когда закрывается
+ * окно торговли или карты, — и все снимки после первой торговли выходили
+ * закрытыми ею. Проверять по такому снимку нечего, поэтому прячем её прямо
+ * перед съёмкой.
+ */
+async function shot(page, file) {
+  await page.evaluate(() => {
+    const overlay = document.getElementById('lock-overlay');
+    if (overlay) overlay.style.display = 'none';
+  });
+  await page.screenshot({ path: file });
+}
+
 function startServer() {
   const server = createServer(async (request, response) => {
     try {
@@ -76,8 +92,15 @@ async function main() {
   const { server, port } = await startServer();
   const url = `http://127.0.0.1:${port}/?faction=elves`;
 
+  // Готовый Chromium можно указать снаружи: на машинах, где браузер уже лежит
+  // рядом, качать второй такой же незачем.
+  //   SMOKE_CHROMIUM=/путь/к/chrome node tools/smoke.mjs
+  const executablePath = process.env.SMOKE_CHROMIUM || undefined;
+  if (executablePath) console.log(`→ браузер взят по указанию: ${executablePath}`);
+
   const browser = await chromium.launch({
     headless: !headed,
+    executablePath,
     args: ['--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--disable-dev-shm-usage', '--no-sandbox'],
   });
 
@@ -111,7 +134,7 @@ async function main() {
 
     const stats = await page.evaluate(() => window.__game.stats());
     const file = join(outDir, `zone-${zone.key}.png`);
-    await page.screenshot({ path: file });
+    await shot(page, file);
 
     results.push({ zone: zone.title, ...stats });
     console.log(
@@ -145,7 +168,7 @@ async function main() {
       window.__game.lookAt(at[0], at[1], pitch);
     }, spot);
     await page.waitForTimeout(2200);
-    await page.screenshot({ path: join(outDir, `place-${spot.key}.png`) });
+    await shot(page, join(outDir, `place-${spot.key}.png`));
     const stats = await page.evaluate(() => window.__game.stats());
     console.log(`→ ${spot.title.padEnd(22)} вызовов ${stats.drawCalls}, треугольников ${Math.round(stats.triangles / 1000)}k`);
   }
@@ -157,7 +180,7 @@ async function main() {
     window.__game.look(-2.3, -0.06);
   });
   await page.waitForTimeout(2500);
-  await page.screenshot({ path: join(outDir, 'panorama-forest.png') });
+  await shot(page, join(outDir, 'panorama-forest.png'));
   const panorama = await page.evaluate(() => window.__game.stats());
   console.log(
     `→ панорама леса: ${panorama.forest.impostors} деревьев картинками, ${panorama.forest.lod1} моделями поодаль`,
@@ -178,7 +201,7 @@ async function main() {
     window.__game.spawnEnemy(3.4, 'palace', 'mace'),
   ]);
   await page.waitForTimeout(700);
-  await page.screenshot({ path: join(outDir, 'combat-before.png') });
+  await shot(page, join(outDir, 'combat-before.png'));
 
   // Целимся в руку и рубим именно её: это и есть обещанное «отрубить руку».
   for (let i = 0; i < 14; i++) {
@@ -194,7 +217,7 @@ async function main() {
   if (afterArm.severedLimbs === 0) {
     failures.push('прицельные удары топором по руке не отрубили её');
   }
-  await page.screenshot({ path: join(outDir, 'combat-severed.png') });
+  await shot(page, join(outDir, 'combat-severed.png'));
 
   // Теперь добиваем: бьём куда придётся.
   for (let i = 0; i < 18; i++) {
@@ -210,7 +233,7 @@ async function main() {
   console.log(
     `→ бой: живых ${battle.alive}, трупов ${battle.corpses}, отрублено конечностей ${battle.severedLimbs}`,
   );
-  await page.screenshot({ path: join(outDir, 'combat-after.png') });
+  await shot(page, join(outDir, 'combat-after.png'));
 
   if (battle.severedLimbs === 0 && battle.corpses === 0) {
     failures.push('после двух десятков ударов топором никто не пострадал — бой не работает');
@@ -222,7 +245,7 @@ async function main() {
     window.__game.hurt('leftEye', 40, 'pierce');
   });
   await page.waitForTimeout(900);
-  await page.screenshot({ path: join(outDir, 'injury-eye.png') });
+  await shot(page, join(outDir, 'injury-eye.png'));
 
   const oneEyed = await page.evaluate(() => window.__game.player());
   console.log(`→ после удара в глаз: обзор «${oneEyed.visionLoss}», раны — ${oneEyed.injuries.join(', ')}`);
@@ -233,7 +256,7 @@ async function main() {
     window.__game.hurt('rightLeg', 200, 'cut');
   });
   await page.waitForTimeout(1400);
-  await page.screenshot({ path: join(outDir, 'injury-crawl.png') });
+  await shot(page, join(outDir, 'injury-crawl.png'));
 
   const crippled = await page.evaluate(() => window.__game.player());
   console.log(
@@ -266,7 +289,7 @@ async function main() {
     return window.__game.goToCaravan();
   });
   await page.waitForTimeout(2600);
-  await page.screenshot({ path: join(outDir, 'caravan.png') });
+  await shot(page, join(outDir, 'caravan.png'));
 
   console.log(
     `→ корован ${caravan.from} → ${caravan.to}: ${caravan.cargo}, ` +
@@ -303,7 +326,7 @@ async function main() {
   if (!guardedReply.some((line) => line.includes('стерег'))) {
     failures.push('E у охраняемого обоза не даёт никакого ответа');
   }
-  await page.screenshot({ path: join(outDir, 'caravan-guarded.png') });
+  await shot(page, join(outDir, 'caravan-guarded.png'));
 
   // Засада: подходим вплотную, рубим сопровождение, подлечиваясь между заходами.
   for (let i = 0; i < 70; i++) {
@@ -342,7 +365,7 @@ async function main() {
 
   await page.evaluate(() => window.__game.loot());
   await page.waitForTimeout(500);
-  await page.screenshot({ path: join(outDir, 'caravan-plundered.png') });
+  await shot(page, join(outDir, 'caravan-plundered.png'));
 
   const emptyHint = await page.evaluate(() => window.__game.hint());
   if (emptyHint && emptyHint.startsWith('E —')) {
@@ -370,10 +393,67 @@ async function main() {
     failures.push('после грабежа ни с кем не испортились отношения');
   }
 
+  // ── Награда за голову ─────────────────────────────────────────────────────
+  // Ограбление уже случилось выше — значит, за голову должны были назначить.
+  const bountyAfterRobbery = await page.evaluate(() => window.__game.bounty());
+  const palaceBounty = bountyAfterRobbery.find((entry) => entry.faction === 'palace');
+  console.log(
+    palaceBounty
+      ? `→ за голову назначено: ${palaceBounty.bounty} зол. (${palaceBounty.faction})`
+      : '→ награду за голову не назначили',
+  );
+  if (!palaceBounty || palaceBounty.bounty <= 0) {
+    failures.push('после грабежа корована за голову никто ничего не назначил');
+  }
+
+  // Охотники выходят и идут именно к игроку, а не бродят по своим делам.
+  const huntersSent = await page.evaluate(() => window.__game.sendHunters('palace'));
+  console.log(`→ вышло охотников: ${huntersSent}`);
+  if (huntersSent <= 0) failures.push('охотники за головой не вышли');
+
+  // Ждём подолгу намеренно. Шаг времени в игре ограничен 0.05 с, а здесь всего
+  // пара кадров в секунду, поэтому за секунду наблюдения мир проживает около
+  // одной десятой секунды. Сближение идёт правильно, просто вдесятеро медленнее
+  // наблюдателя — на настоящей видеокарте этих пауз не потребовалось бы.
+  const firstSighting = await page.evaluate(() => window.__game.nearestHunter());
+  await page.waitForTimeout(15000);
+  const secondSighting = await page.evaluate(() => window.__game.nearestHunter());
+  console.log(
+    firstSighting && secondSighting
+      ? `→ ближайший охотник: ${Math.round(firstSighting.distance)} м → ${Math.round(secondSighting.distance)} м`
+      : '→ охотников на карте нет',
+  );
+  if (!secondSighting) {
+    failures.push('охотники исчезли, не дойдя до игрока');
+  } else if (secondSighting.distance >= firstSighting.distance) {
+    failures.push('охотники не приближаются к игроку — погони нет');
+  }
+
+  // Награда видна игроку в строке состояния, а не только в служебных данных.
+  const bountyOnScreen = await page.evaluate(() => document.getElementById('hud')?.textContent ?? '');
+  console.log(`→ строка состояния: «${bountyOnScreen}»`);
+  if (!bountyOnScreen.includes('голов') && !bountyOnScreen.includes('след')) {
+    failures.push('про награду за голову на экране ничего не написано');
+  }
+  await shot(page, join(outDir, 'hunters.png'));
+
+  // Вира: второй выход из-под охоты, кроме резни.
+  const payoff = await page.evaluate(() => {
+    const before = window.__game.bounty().find((entry) => entry.faction === 'palace')?.bounty ?? 0;
+    // Насыпаем золота: проверяем сам откуп, а не умение накопить.
+    window.__game.giveGold(before * 2 + 100);
+    // Виру берёт та сторона, что держит прилавок, — значит, идём во дворец.
+    const paid = window.__game.payBounty('palace');
+    return { before, paid, after: window.__game.bounty().find((entry) => entry.faction === 'palace')?.bounty ?? 0 };
+  });
+  console.log(`→ вира: платили за ${payoff.before} зол., приняли ${payoff.paid ? 'да' : 'нет'}, стало ${payoff.after}`);
+  if (!payoff.paid) failures.push('виру заплатить не удалось');
+  if (payoff.after !== 0) failures.push('после уплаты виры награда за голову не снялась');
+
   // ── Прилавок ──────────────────────────────────────────────────────────────
   await page.evaluate(() => window.__game.openTrade('village'));
   await page.waitForTimeout(700);
-  await page.screenshot({ path: join(outDir, 'trade.png') });
+  await shot(page, join(outDir, 'trade.png'));
 
   const tradeVisible = await page.evaluate(() => {
     const screen = document.getElementById('trade-screen');
@@ -384,6 +464,122 @@ async function main() {
 
   await page.evaluate(() => window.__game.closeTrade());
   await page.waitForTimeout(300);
+
+  // ── Дорожные встречи ──────────────────────────────────────────────────────
+  // Встаём на тракт: сцены ставятся по дорогам, а не по чистому полю.
+  await page.evaluate(() => {
+    window.__game.healPlayer();
+    window.__game.teleport(40, 470);
+  });
+  await page.waitForTimeout(1200);
+
+  // Раненый на обочине. Перевязываем ровно так, как человек: смотрим подсказку
+  // и жмём E. Никаких обходных путей — на этом уже обжигались с корованами.
+  const woundedSpawned = await page.evaluate(() => window.__game.spawnEncounter('wounded'));
+  console.log(`→ встреча поставлена: ${woundedSpawned ?? 'не удалось'}`);
+  if (woundedSpawned !== 'wounded') failures.push('раненый на дороге не появился');
+
+  const woundedHint = await page.evaluate(() => {
+    window.__game.give('bandage', 3);
+    window.__game.goToEncounter('wounded');
+    return window.__game.hint();
+  });
+  console.log(`→ подсказка у раненого: ${woundedHint ? `«${woundedHint}»` : 'нет'}`);
+  if (!woundedHint || !woundedHint.startsWith('E —')) {
+    failures.push(`у раненого нет зова к действию: «${woundedHint ?? 'нет'}»`);
+  }
+  await shot(page, join(outDir, 'encounter-wounded.png'));
+
+  const healed = await page.evaluate(() => {
+    const goldBefore = window.__game.player().gold;
+    window.__game.loot();
+    return { goldBefore, goldAfter: window.__game.player().gold, log: window.__game.messages() };
+  });
+  console.log(`→ после перевязки: ${healed.log.at(-1) ?? 'тишина'} (золото ${healed.goldBefore} → ${healed.goldAfter})`);
+  if (!healed.log.some((line) => line.includes('перевяз'))) {
+    failures.push('E у раненого ничего не сделал');
+  }
+
+  // Беглец с краденым: сделка тоже через подсказку и E.
+  const pedlarSpawned = await page.evaluate(() => window.__game.spawnEncounter('pedlar'));
+  if (pedlarSpawned !== 'pedlar') failures.push('беглец с краденым не появился');
+
+  const deal = await page.evaluate(() => {
+    window.__game.giveGold(400);
+    window.__game.goToEncounter('pedlar');
+    const hint = window.__game.hint();
+    const goldBefore = window.__game.player().gold;
+    window.__game.loot();
+    return { hint, goldBefore, goldAfter: window.__game.player().gold, log: window.__game.messages() };
+  });
+  console.log(`→ беглец: «${deal.hint ?? 'нет подсказки'}», золото ${deal.goldBefore} → ${deal.goldAfter}`);
+  if (!deal.hint || !deal.hint.startsWith('E —')) failures.push('беглец не предлагает сделку по E');
+  if (deal.goldAfter >= deal.goldBefore) failures.push('покупка с рук не списала золото');
+  await shot(page, join(outDir, 'encounter-pedlar.png'));
+
+  // Засада: разбойники должны сами дойти до игрока и напасть.
+  const ambushSpawned = await page.evaluate(() => window.__game.spawnEncounter('ambush'));
+  if (ambushSpawned !== 'ambush') failures.push('засада на дороге не выставилась');
+
+  // Проверяем намерение, а не только расстояние.
+  //
+  // Расстояние здесь плохой одиночный признак по двум причинам. Первая: игра
+  // ограничивает шаг времени 0.05 с, а кадров тут пара в секунду, поэтому за
+  // минуту наблюдения мир проживает секунд шесть — разбойники успевают сделать
+  // десяток шагов. Вторая: к этому моменту за игроком уже идут охотники других
+  // сторон, а разбойникам они враги, и драка по дороге — правильное поведение,
+  // а не поломка. Поэтому смотрим на то, что решает разум: куда поставлен
+  // якорь и чем человек занят.
+  const track = [];
+  for (let i = 0; i < 8; i++) {
+    const rows = await page.evaluate(() =>
+      window.__game.actorsNear(600).filter((actor) => actor.name.includes('разбойник')),
+    );
+    if (rows.length > 0) track.push(rows);
+    await page.waitForTimeout(5000);
+  }
+
+  if (track.length === 0) {
+    failures.push('засада пропала, не дойдя до игрока');
+  } else {
+    const first = track[0];
+    const last = track[track.length - 1];
+    const playerAt = await page.evaluate(() => window.__game.stats().position);
+
+    const distances = track.map((rows) => Math.min(...rows.map((actor) => actor.distance)));
+    console.log(`→ засада идёт: ${distances.join(' → ')} м`);
+    console.log(`→ занятие разбойников: ${last.map((actor) => `${actor.state}${actor.targetName ? ` (${actor.targetName})` : ''}`).join(', ')}`);
+
+    // Якорь должен указывать на игрока: именно это значит «засада на вас».
+    const anchoredAtPlayer = last.every(
+      (actor) => actor.anchored && Math.hypot(actor.anchorX - playerAt.x, actor.anchorZ - playerAt.z) < 60,
+    );
+    if (!anchoredAtPlayer) failures.push('разбойники из засады идут не к игроку');
+
+    // И они должны что-то делать: идти, догонять или драться, но не стоять.
+    const busy = last.every((actor) => actor.state !== 'idle');
+    if (!busy) failures.push('разбойники из засады стоят на месте');
+
+    const closed = Math.min(...distances) < distances[0];
+    console.log(
+      closed
+        ? `→ подобрались на ${Math.round(distances[0] - Math.min(...distances))} м`
+        : '→ сблизиться не успели (в пути ввязались в чужую драку)',
+    );
+    void first;
+  }
+  await shot(page, join(outDir, 'encounter-ambush.png'));
+
+  // Конвой с пленным: сцена должна встать целиком — стража плюс пленный.
+  const prisoner = await page.evaluate(() => {
+    window.__game.spawnEncounter('prisoner');
+    window.__game.goToEncounter('prisoner');
+    return window.__game.encounters().find((entry) => entry.kind === 'prisoner');
+  });
+  await page.waitForTimeout(1200);
+  console.log(prisoner ? `→ конвой с пленным: ${prisoner.alive} чел.` : '→ конвой с пленным не вышел');
+  if (!prisoner || prisoner.alive < 3) failures.push('конвой с пленным вышел неполным');
+  await shot(page, join(outDir, 'encounter-prisoner.png'));
 
   // ── Три судьбы ────────────────────────────────────────────────────────────
   // Играем за эльфов: приказ берём у старшего партизана в лагере.
@@ -405,7 +601,7 @@ async function main() {
   );
   if (!orderTaken.order) failures.push('приказ не выдался');
 
-  await page.screenshot({ path: join(outDir, 'orders.png') });
+  await shot(page, join(outDir, 'orders.png'));
 
   // Набег: стороны воюют между собой и без участия игрока.
   const raid = await page.evaluate(() => window.__game.launchRaid('palace-on-elves'));
@@ -416,7 +612,12 @@ async function main() {
   // Отряд злодея: проверяем в отдельной вкладке, играя за злодея.
   const villainPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   villainPage.on('pageerror', (error) => errors.push('злодей: ' + String(error)));
-  await villainPage.goto(`http://127.0.0.1:${port}/?faction=villain`, { waitUntil: 'domcontentloaded' });
+  // Вторая вкладка поднимается медленно: первая продолжает считать мир, а
+  // видеокарты здесь нет вовсе — обе картинки рисует процессор.
+  await villainPage.goto(`http://127.0.0.1:${port}/?faction=villain`, {
+    waitUntil: 'domcontentloaded',
+    timeout: 180000,
+  });
   await villainPage.waitForFunction(() => window.__game?.ready === true, null, { timeout: 180000 });
   await villainPage.evaluate(() => {
     const overlay = document.getElementById('lock-overlay');
@@ -438,7 +639,7 @@ async function main() {
     return window.__game.factions();
   });
   await villainPage.waitForTimeout(1200);
-  await villainPage.screenshot({ path: join(outDir, 'villain-squad.png') });
+  await shot(villainPage, join(outDir, 'villain-squad.png'));
 
   // Приказ «собрать людей» злодей закрывает сам, как только отряд набран, —
   // поэтому в сводке он может быть уже не в активных, а в выполненных.
@@ -499,10 +700,18 @@ async function main() {
   console.log(`→ слоты: ${slots.map((slot) => `${slot.slot}: ${slot.label}`).join(' | ')}`);
   if (!slots.some((slot) => slot.used)) failures.push('сохранение не попало в слот');
 
-  // Карта мира.
+  // Карта мира. Перед съёмкой выпускаем охоту: от охотников можно уйти, но для
+  // этого их надо видеть, — значит, на карте они обязаны быть.
+  const huntersOnMap = await page.evaluate(() => {
+    window.__game.sendHunters('villain');
+    return window.__game.nearestHunter();
+  });
+  console.log(`→ на карту выпущены охотники: ${huntersOnMap ? `${Math.round(huntersOnMap.distance)} м` : 'нет'}`);
+  if (!huntersOnMap) failures.push('охотников не видно на карте — уходить не от кого');
+
   await page.evaluate(() => window.__game.openMap());
   await page.waitForTimeout(900);
-  await page.screenshot({ path: join(outDir, 'map.png') });
+  await shot(page, join(outDir, 'map.png'));
   const mapVisible = await page.evaluate(() => {
     const screen = document.getElementById('map-screen');
     return screen ? getComputedStyle(screen).display !== 'none' : false;
@@ -519,7 +728,7 @@ async function main() {
     window.__game.setTimeOfDay(0.02);
   });
   await page.waitForTimeout(2000);
-  await page.screenshot({ path: join(outDir, 'night-elf.png') });
+  await shot(page, join(outDir, 'night-elf.png'));
   console.log('→ ночной кадр снят');
 
   await browser.close();

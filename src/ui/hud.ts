@@ -48,6 +48,8 @@ export interface HudState {
   factionName: string;
   /** Сколько бойцов идёт следом. */
   squadSize: number;
+  /** Самая большая награда за голову и кто её назначил. */
+  bounty: { name: string; amount: number; hunted: boolean } | null;
 }
 
 export class Hud {
@@ -187,7 +189,12 @@ export class Hud {
     ].filter((value): value is string => value !== null);
     this.gearLine.textContent = parts.join('   ·   ');
 
-    this.placeLine.textContent = `${state.factionName} · ${state.zoneName} · ${state.clock}`;
+    // Награду держим в строке места: она про то, где вы и кем вас считают.
+    const bounty = state.bounty
+      ? ` · ${state.bounty.hunted ? 'по следу идут' : 'за голову'} ${state.bounty.amount} зол. (${state.bounty.name})`
+      : '';
+    this.placeLine.textContent = `${state.factionName} · ${state.zoneName} · ${state.clock}${bounty}`;
+    this.placeLine.style.color = state.bounty?.hunted ? '#d07a5a' : '';
 
     if (state.order) {
       this.orderLine.style.display = 'block';

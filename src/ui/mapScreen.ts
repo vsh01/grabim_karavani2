@@ -18,6 +18,8 @@ export interface MapMarker {
   z: number;
   owner: Faction;
   label: string;
+  /** Обоз рисуется кружком, охотник за головой — красным ромбом. */
+  kind?: 'caravan' | 'hunter';
 }
 
 export interface MapContext {
@@ -91,14 +93,29 @@ export class MapScreen {
     ctx.clearRect(0, 0, MAP_SIZE, MAP_SIZE);
     ctx.drawImage(this.base, 0, 0);
 
-    // Обозы в пути.
+    // Обозы в пути и те, кто идёт по вашу душу.
     for (const marker of context.markers) {
       const [x, y] = toMap(marker.x, marker.z);
-      ctx.fillStyle = `#${FACTIONS[marker.owner].accent.toString(16).padStart(6, '0')}`;
       ctx.strokeStyle = 'rgba(0,0,0,0.7)';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.arc(x, y, 4, 0, Math.PI * 2);
+
+      if (marker.kind === 'hunter') {
+        // Ромб и красный цвет: от охотников можно уйти, но для этого надо
+        // видеть, где они. Обводка светлая — тёмная терялась на горах, которые
+        // на карте и без того красные.
+        ctx.fillStyle = '#e8402a';
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+        ctx.moveTo(x, y - 6);
+        ctx.lineTo(x + 5, y);
+        ctx.lineTo(x, y + 6);
+        ctx.lineTo(x - 5, y);
+        ctx.closePath();
+      } else {
+        ctx.fillStyle = `#${FACTIONS[marker.owner].accent.toString(16).padStart(6, '0')}`;
+        ctx.arc(x, y, 4, 0, Math.PI * 2);
+      }
+
       ctx.fill();
       ctx.stroke();
     }

@@ -7,6 +7,8 @@ import { Economy } from '../src/systems/economy';
 import { QuestLog } from '../src/systems/quests';
 import { Faction } from '../src/data/factions';
 import { Rng } from '../src/core/rng';
+import { BountySystem } from '../src/systems/bounty';
+import { fakePopulation } from './fakes';
 
 /** Собрать снимок так же, как это делает игра, но без графики. */
 function buildSave(): SaveGame {
@@ -51,6 +53,7 @@ function buildSave(): SaveGame {
     reputation: reputation.serialize(),
     quests: quests.serialize(),
     economy: economy.serialize(),
+    bounty: { values: { [Faction.Palace]: 180 } },
     actors: [],
     caravans: [
       {
@@ -118,6 +121,33 @@ describe('снимок сохранения', () => {
 
   it('снимок текущей версии проходит проверку', () => {
     expect(migrate(buildSave())).not.toBeNull();
+  });
+
+  it('сохранение первой версии открывается, хотя про награду там ничего нет', () => {
+    // Ровно то, что лежит в браузере у того, кто играл до появления охоты:
+    // поля bounty в снимке просто не существует.
+    const { bounty: _gone, ...withoutBounty } = JSON.parse(JSON.stringify(buildSave())) as SaveGame;
+    const old = { ...withoutBounty, version: 1 } as SaveGame;
+
+    const migrated = migrate(old);
+    expect(migrated).not.toBeNull();
+    expect(migrated?.version).toBe(SAVE_VERSION);
+    // В том мире награды не было — значит, никто никого и не ищет.
+    expect(migrated?.bounty).toEqual({ values: {} });
+
+    const bounty = new BountySystem(fakePopulation().population, 1, () => {});
+    bounty.restore(migrated?.bounty);
+    expect(bounty.get(Faction.Palace)).toBe(0);
+    expect(bounty.worst).toBeNull();
+  });
+
+  it('награда за голову переживает запись и чтение', () => {
+    const raw = JSON.parse(JSON.stringify(buildSave())) as SaveGame;
+
+    const bounty = new BountySystem(fakePopulation().population, 1, () => {});
+    bounty.restore(raw.bounty);
+    expect(bounty.get(Faction.Palace)).toBe(180);
+    expect(bounty.worst?.faction).toBe(Faction.Palace);
   });
 
   it('подпись слота читаема', () => {

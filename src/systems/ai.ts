@@ -131,7 +131,10 @@ function findThreat(actor: Actor, world: AiWorld): Threat {
 
   const player = world.player;
   if (player.wounds.alive) {
-    consider(player.position, player.faction, world.playerHostility(actor.faction), null, true);
+    // Охотнику за головой всё равно, как сторона относится к игроку: ему
+    // заплатили за конкретного человека.
+    const hostility = actor.huntsPlayer ? 1 : world.playerHostility(actor.faction);
+    consider(player.position, player.faction, hostility, null, true);
   }
 
   return best;

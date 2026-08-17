@@ -122,6 +122,12 @@ export class Actor {
   commandsFaction: Faction | null = null;
   /** Боец в отряде игрока — за него отвечают приказы, а не патрульный распорядок. */
   inPlayerSquad = false;
+  /**
+   * Охотится лично за игроком: нападёт, даже если со стороной у игрока мир.
+   * Так ведут себя охотники за головой и дорожные разбойники — им платят не за
+   * вражду фракций, а за конкретного человека.
+   */
+  huntsPlayer = false;
   /** Труп исчезает не сразу — сколько он уже лежит. */
   corpseAge = 0;
 
@@ -349,6 +355,7 @@ export class Actor {
       shopSiteId: this.shopSiteId,
       commandsFaction: this.commandsFaction,
       inPlayerSquad: this.inPlayerSquad,
+      huntsPlayer: this.huntsPlayer,
       corpseAge: this.corpseAge,
     };
   }
@@ -365,6 +372,8 @@ export class Actor {
     this.shopSiteId = snapshot.shopSiteId;
     this.commandsFaction = snapshot.commandsFaction;
     this.inPlayerSquad = snapshot.inPlayerSquad;
+    // Снимки старого формата про охоту не знают — там это просто «нет».
+    this.huntsPlayer = snapshot.huntsPlayer ?? false;
     this.corpseAge = snapshot.corpseAge;
 
     this.model.setWeaponVisible(this.weapon.id !== 'fists');

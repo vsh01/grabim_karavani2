@@ -15,6 +15,8 @@ export interface TradeActions {
   use(def: ItemDef): void;
   equip(def: ItemDef): void;
   heal(): void;
+  /** Заплатить виру той стороне, что держит прилавок. */
+  payBounty(): void;
   close(): void;
 }
 
@@ -27,6 +29,8 @@ export interface TradeContext {
   market?: Market;
   /** Сколько стоит полное лечение у этого лекаря. */
   healCost: number;
+  /** Сколько просят за то, чтобы снять награду с вашей головы. Ноль — не ищут. */
+  bloodMoney: number;
   actions: TradeActions;
 }
 
@@ -196,6 +200,19 @@ export class TradeScreen {
       );
       if (!needsHelp || context.inventory.gold < context.healCost) heal.classList.add('trade-disabled');
       this.footer.appendChild(heal);
+    }
+
+    // Вира: откупиться от охоты, не доводя до драки. Дорого — вдвое против
+    // назначенного, — но иначе за вами так и будут ходить.
+    if (context.bloodMoney > 0) {
+      const note = document.createElement('div');
+      note.className = 'trade-note';
+      note.textContent = 'За вашу голову назначена награда. Виру берут здесь же.';
+      this.footer.appendChild(note);
+
+      const payoff = this.button(`откупиться — ${context.bloodMoney} зол.`, () => context.actions.payBounty());
+      if (context.inventory.gold < context.bloodMoney) payoff.classList.add('trade-disabled');
+      this.footer.appendChild(payoff);
     }
 
     const hint = document.createElement('div');

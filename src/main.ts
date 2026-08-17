@@ -2,6 +2,7 @@ import { Game } from './game';
 import { ZONES, Zone, zoneAt } from './world/zones';
 import { Faction } from './data/factions';
 import type { BodyPart } from './entities/body';
+import type { EncounterKind } from './systems/encounters';
 import { StartMenu } from './ui/startMenu';
 
 /** Сид мира. Одно число — и весь ландшафт, лес и постройки те же самые. */
@@ -114,6 +115,9 @@ async function main(): Promise<void> {
       give(id: string, count = 1, equip = false): void {
         game.debugGive(id, count, equip);
       },
+      giveGold(amount: number): number {
+        return game.debugGiveGold(amount);
+      },
       hurt(part: BodyPart, amount: number, type: 'cut' | 'blunt' | 'pierce' = 'cut'): void {
         game.debugHurtPlayer(part, amount, type);
       },
@@ -155,6 +159,30 @@ async function main(): Promise<void> {
       },
       launchRaid(planId?: string) {
         return game.debugLaunchRaid(planId);
+      },
+      spawnEncounter(kind?: EncounterKind) {
+        return game.debugSpawnEncounter(kind);
+      },
+      encounters() {
+        return game.debugEncounters();
+      },
+      goToEncounter(kind: EncounterKind): boolean {
+        return game.debugGoToEncounter(kind);
+      },
+      bounty() {
+        return game.debugBounty();
+      },
+      actorsNear(radius?: number) {
+        return game.debugActorsNear(radius);
+      },
+      sendHunters(faction: Faction = Faction.Palace): number {
+        return game.debugSendHunters(faction);
+      },
+      nearestHunter() {
+        return game.debugNearestHunter();
+      },
+      payBounty(siteId: string): boolean {
+        return game.debugPayBounty(siteId);
       },
       factions() {
         return game.factionReport();

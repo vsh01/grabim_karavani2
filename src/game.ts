@@ -26,6 +26,8 @@ import { SITES, getSite } from './world/sites';
 import { buildSettlements } from './world/settlements';
 import { QuestLog } from './systems/quests';
 import { RaidSystem } from './systems/raids';
+import { BountySystem } from './systems/bounty';
+import { EncounterSystem, type EncounterKind } from './systems/encounters';
 import { Rng } from './core/rng';
 import {
   SAVE_VERSION,
@@ -83,7 +85,9 @@ type Interaction =
   | { kind: 'caravan'; caravan: Caravan }
   | { kind: 'trade'; actor: Actor; market: Market }
   | { kind: 'commander'; actor: Actor }
-  | { kind: 'recruit'; actor: Actor };
+  | { kind: 'recruit'; actor: Actor }
+  | { kind: 'wounded'; actor: Actor }
+  | { kind: 'pedlar'; actor: Actor; price: number; goods: { id: string; count: number }[] };
 
 /** Приказ отряду злодея. */
 type SquadOrder = 'follow' | 'hold' | 'attack';
@@ -121,6 +125,8 @@ export class Game {
   combat!: CombatSystem;
   caravans!: CaravanSystem;
   raids!: RaidSystem;
+  encounters!: EncounterSystem;
+  bounty!: BountySystem;
   reputation!: Reputation;
 
   private running = false;
@@ -226,6 +232,17 @@ export class Game {
     this.raids = new RaidSystem(this.population, this.terrain, seed, (message) =>
       this.hud.log(message, 'bad'),
     );
+
+    this.bounty = new BountySystem(this.population, seed, (message, tone) => this.hud.log(message, tone));
+    this.encounters = new EncounterSystem(this.roads, this.population, seed, (message, tone) =>
+      this.hud.log(message, tone),
+    );
+    // Освобождённый пленный — заслуга перед эльфами; считает это игра, а не
+    // сама встреча: репутация не её дело.
+    this.encounters.onFreed = () => {
+      this.reputation.change(Faction.Elves, 12);
+      this.hud.log(`Лесные эльфы запомнят это (${this.reputation.describe(Faction.Elves)})`, 'good');
+    };
 
     this.targets = { actors: this.population.actors, player: this.player };
     this.aiWorld = {
@@ -422,6 +439,16 @@ export class Game {
     this.population.update(dt, this.aiWorld, this.player.position);
     this.caravans.update(dt);
     this.raids.update(dt);
+    this.encounters.update(dt, {
+      playerX: this.player.position.x,
+      playerZ: this.player.position.z,
+      playerYaw: this.player.yaw,
+    });
+    this.bounty.update(dt, {
+      playerX: this.player.position.x,
+      playerZ: this.player.position.z,
+      playerAlive: this.player.wounds.alive,
+    });
     this.economy.update(dt);
     this.updateSquad(dt);
     this.updateReachedSites(dt);
@@ -558,7 +585,58 @@ export class Game {
       this.recruit(target.actor);
       return;
     }
+    if (target.kind === 'wounded') {
+      this.helpWounded(target.actor);
+      return;
+    }
+    if (target.kind === 'pedlar') {
+      this.buyFromPedlar(target.actor, target.price);
+      return;
+    }
     this.openTrade(target.market);
+  }
+
+  /**
+   * Перевязать встречного.
+   *
+   * Рана у него настоящая, той же системы, что и у игрока: не поможете —
+   * истечёт кровью и останется лежать на обочине. Бинт списывается из мешка.
+   */
+  private helpWounded(actor: Actor): void {
+    if (!this.player.inventory.remove('bandage', 1)) {
+      this.hud.log('Бинтов не осталось — помочь нечем', 'bad');
+      return;
+    }
+
+    const reward = this.encounters.helpWounded(actor);
+    this.player.inventory.gold += reward;
+    this.audio.play('coin');
+
+    this.hud.log(
+      reward > 0 ? `${actor.name} перевязан и отдал ${reward} золота` : `${actor.name} перевязан`,
+      'good',
+    );
+    this.reputation.change(actor.faction, 8);
+    this.hud.log(`${FACTIONS[actor.faction].name}: ${this.reputation.describe(actor.faction)}`, 'plain');
+  }
+
+  /** Купить у беглеца мешок краденого: дёшево, но люди этого не любят. */
+  private buyFromPedlar(actor: Actor, price: number): void {
+    if (this.player.inventory.gold < price) {
+      this.hud.log(`Не хватает золота: нужно ${price}`, 'bad');
+      return;
+    }
+
+    const goods = this.encounters.buyFromPedlar(actor);
+    if (!goods) return;
+
+    this.player.inventory.gold -= price;
+    for (const entry of goods) this.player.inventory.add(entry.id, entry.count);
+    this.audio.play('coin');
+
+    const names = goods.map((entry) => `${tryItem(entry.id)?.name ?? entry.id} ×${entry.count}`).join(', ');
+    this.hud.log(`Куплено с рук: ${names}`, 'good');
+    this.reputation.change(Faction.Neutral, -3);
   }
 
   /**
@@ -805,6 +883,10 @@ export class Game {
     this.caravans.registerRobbery(caravan);
     if (this.quests.onRobbery(caravan.owner)) this.announceOrderDone();
 
+    // За голову назначают по стоимости увезённого: мелочь простят, богатый обоз —
+    // нет. Отсюда и берутся охотники на тракте.
+    this.bounty.registerRobbery(caravan.owner, value, loot.gold);
+
     // Обиделся хозяин груза; те, кто с ним враждует, наоборот, довольны.
     this.reputation.change(caravan.owner, -22);
     if (caravan.owner !== Faction.Neutral) this.reputation.change(Faction.Neutral, -6);
@@ -860,7 +942,11 @@ export class Game {
 
     if (event.killed) {
       this.hud.log(`${victim.name} убит`, 'good');
-      if (event.fromPlayer && this.quests.onKill(victim.faction)) this.announceOrderDone();
+      if (event.fromPlayer) {
+        // Убийство помнят: за каждого убитого сторона добавляет к награде.
+        this.bounty.registerKill(victim.faction);
+        if (this.quests.onKill(victim.faction)) this.announceOrderDone();
+      }
     } else if (event.severed) {
       this.hud.log(`${victim.name}: ${event.message}`, 'good');
     } else if (event.damage > 0 && event.attackerName === this.player.characterName) {
@@ -901,10 +987,22 @@ export class Game {
       squadSize: this.squad.length,
       zoneName: ZONES[zoneAt(position.x, position.z)].name,
       clock: this.sky.clockLabel,
+      bounty: this.bountyLine(),
     });
 
     this.overlay.update(dt, this.player.wounds);
     this.updateDebug();
+  }
+
+  /** Что показать про награду за голову: пусто, если вас никто не ищет. */
+  private bountyLine(): { name: string; amount: number; hunted: boolean } | null {
+    const worst = this.bounty.worst;
+    if (!worst) return null;
+    return {
+      name: FACTIONS[worst.faction].name,
+      amount: worst.amount,
+      hunted: this.bounty.hunterActors().length > 0,
+    };
   }
 
   /**
@@ -966,6 +1064,16 @@ export class Game {
       return;
     }
 
+    // Встречные на дороге: раненый и беглец с мешком.
+    const met = this.encounters.interactionAt(x, z, INTERACT_RANGE + 1.2);
+    if (met) {
+      this.interaction =
+        met.kind === 'wounded'
+          ? { kind: 'wounded', actor: met.actor }
+          : { kind: 'pedlar', actor: met.actor, price: met.price, goods: met.goods };
+      return;
+    }
+
     const corpse = this.population.nearest(x, z, INTERACT_RANGE, (actor) => !actor.alive);
     this.interaction = corpse ? { kind: 'corpse', actor: corpse } : null;
   }
@@ -977,6 +1085,17 @@ export class Game {
     if (target.kind === 'corpse') return `E — обыскать (${target.actor.name})`;
     if (target.kind === 'caravan') return this.caravanHint(target.caravan);
     if (target.kind === 'recruit') return `E — нанять за ${RECRUIT_COST} зол. (${target.actor.name})`;
+    if (target.kind === 'wounded') {
+      const left = Math.round(target.actor.wounds.secondsUntilBleedOut);
+      const clock = Number.isFinite(left) && left > 0 ? `, истечёт через ${left} с` : '';
+      return this.player.inventory.has('bandage')
+        ? `E — перевязать (${target.actor.name}${clock})`
+        : `${target.actor.name}: нужен бинт${clock}`;
+    }
+    if (target.kind === 'pedlar') {
+      const goods = target.goods.map((entry) => `${tryItem(entry.id)?.name ?? entry.id} ×${entry.count}`).join(', ');
+      return `E — купить за ${target.price} зол. (${goods})`;
+    }
     if (target.kind === 'commander') {
       if (this.quests.active?.done) return `E — доложить о выполнении (${target.actor.name})`;
       return this.quests.hasActive ? `E — напомнить приказ (${target.actor.name})` : `E — получить приказ (${target.actor.name})`;
@@ -1018,12 +1137,14 @@ export class Game {
       reputation: this.reputation,
       market,
       healCost: HEAL_COST,
+      bloodMoney: market ? this.bounty.bloodMoney(market.owner) : 0,
       actions: {
         buy: (def) => this.buyItem(def, market),
         sell: (def) => this.sellItem(def, market),
         use: (def) => this.useItem(def),
         equip: (def) => this.equipItem(def),
         heal: () => this.buyHealing(market),
+        payBounty: () => this.payBounty(market),
         close: () => this.closeTrade(),
       },
     });
@@ -1032,6 +1153,33 @@ export class Game {
     // trade.isOpen и не показывает заставку поверх прилавка.
     this.input.exitPointerLock();
     this.lockOverlay.style.display = 'none';
+  }
+
+  /**
+   * Заплатить виру.
+   *
+   * Второй выход из-под охоты, кроме резни: отдать вдвое против назначенного —
+   * и вас перестают искать. Дорого настолько, что выбор между «откупиться» и
+   * «отбиться» настоящий.
+   */
+  payBounty(market: Market | undefined): boolean {
+    if (!market) return false;
+
+    const price = this.bounty.bloodMoney(market.owner);
+    if (price <= 0) {
+      this.hud.log('За вами тут ничего не числится', 'plain');
+      return false;
+    }
+    if (this.player.inventory.gold < price) {
+      this.hud.log(`На виру не хватает: нужно ${price} золота`, 'bad');
+      return false;
+    }
+
+    this.player.inventory.gold -= price;
+    this.bounty.payOff(market.owner);
+    this.audio.play('coin');
+    this.hud.log(`Вира уплачена: ${price} золота. ${FACTIONS[market.owner].name} вас больше не ищут.`, 'good');
+    return true;
   }
 
   closeTrade(): void {
@@ -1047,12 +1195,22 @@ export class Game {
       terrain: this.terrain,
       roads: this.roads,
       player: { x: this.player.position.x, z: this.player.position.z, yaw: this.player.yaw },
-      markers: this.caravans.caravans.map((caravan) => ({
-        x: caravan.position.x,
-        z: caravan.position.z,
-        owner: caravan.owner,
-        label: caravan.describeCargo(),
-      })),
+      markers: [
+        ...this.caravans.caravans.map((caravan) => ({
+          x: caravan.position.x,
+          z: caravan.position.z,
+          owner: caravan.owner,
+          label: caravan.describeCargo(),
+          kind: 'caravan' as const,
+        })),
+        ...this.bounty.hunterActors().map((actor) => ({
+          x: actor.position.x,
+          z: actor.position.z,
+          owner: actor.faction,
+          label: actor.name,
+          kind: 'hunter' as const,
+        })),
+      ],
       slots: this.saveSlots(),
       onSave: (slot) => {
         this.saveToSlot(slot);
@@ -1284,6 +1442,12 @@ export class Game {
     if (equip) this.player.inventory.equippedWeapon = id;
   }
 
+  /** Насыпать золота: нужно, чтобы проверять покупки и виру, не наигрывая казну. */
+  debugGiveGold(amount: number): number {
+    this.player.inventory.gold += amount;
+    return this.player.inventory.gold;
+  }
+
   /** Ранить игрока в конкретную часть тела — для проверки увечий. */
   debugHurtPlayer(part: BodyPart, amount: number, type: 'cut' | 'blunt' | 'pierce' = 'cut'): void {
     const report = this.player.wounds.damage(part, amount, { type });
@@ -1450,6 +1614,104 @@ export class Game {
     return this.raids.report();
   }
 
+  /** Поставить дорожную встречу немедленно. */
+  debugSpawnEncounter(kind?: EncounterKind): string | null {
+    return this.encounters.spawn(kind, {
+      playerX: this.player.position.x,
+      playerZ: this.player.position.z,
+      playerYaw: this.player.yaw,
+    });
+  }
+
+  debugEncounters(): { kind: EncounterKind; alive: number; distance: number; resolved: boolean }[] {
+    return this.encounters.report();
+  }
+
+  /**
+   * Подойти к встрече вплотную.
+   * Помощник приводит ровно туда, откуда игрок дотянулся бы рукой, — иначе
+   * проверка меряет не то, что чувствует человек за клавиатурой.
+   */
+  debugGoToEncounter(kind: EncounterKind): boolean {
+    const target = this.encounters.actorOf(kind);
+    if (!target) return false;
+
+    this.player.teleport(target.position.x + 1.2, target.position.z + 1.2, this.terrain);
+    this.debugLookAt(target.position.x, target.position.z);
+    this.forest.update(this.player.position, true);
+    return true;
+  }
+
+  /**
+   * Кто сейчас вокруг и чем занят.
+   * Без этого «человек идёт не туда» приходится угадывать: состояние разума и
+   * точка, к которой он идёт, видны только изнутри.
+   */
+  debugActorsNear(radius = 200): Record<string, unknown>[] {
+    const { x, z } = this.player.position;
+    return this.population.actors
+      .filter((actor) => actor.alive && distance2D(x, z, actor.position.x, actor.position.z) < radius)
+      .map((actor) => ({
+        name: actor.name,
+        faction: actor.faction,
+        state: actor.state,
+        distance: Math.round(distance2D(x, z, actor.position.x, actor.position.z)),
+        huntsPlayer: actor.huntsPlayer,
+        anchored: actor.hasEscortAnchor,
+        anchorX: Math.round(actor.escortAnchor.x),
+        anchorZ: Math.round(actor.escortAnchor.z),
+        targetName: actor.target?.name ?? null,
+      }))
+      .sort((a, b) => (a.distance as number) - (b.distance as number));
+  }
+
+  debugBounty(): { faction: Faction; bounty: number; hunters: number; givingUp: boolean }[] {
+    return this.bounty.report();
+  }
+
+  /** Послать охоту немедленно, не дожидаясь накопления награды. */
+  debugSendHunters(faction: Faction): number {
+    return this.bounty.launch(faction, {
+      playerX: this.player.position.x,
+      playerZ: this.player.position.z,
+      playerAlive: this.player.wounds.alive,
+    });
+  }
+
+  /** Где сейчас ближайший охотник — по этому автотест видит, что он идёт. */
+  debugNearestHunter(): { distance: number; name: string } | null {
+    let best: { distance: number; name: string } | null = null;
+    for (const actor of this.bounty.hunterActors()) {
+      const distance = distance2D(
+        this.player.position.x,
+        this.player.position.z,
+        actor.position.x,
+        actor.position.z,
+      );
+      if (!best || distance < best.distance) best = { distance, name: actor.name };
+    }
+    return best;
+  }
+
+  /**
+   * Заплатить виру — ровно тем же путём, что и человек.
+   *
+   * Сначала прилавок должен открыться: если с вами не желают иметь дела, то и
+   * виру взять не у кого. Пропустить эту проверку значило бы мерить не то, что
+   * происходит в игре, — на этом уже обжигались с корованами.
+   */
+  debugPayBounty(siteId: string): boolean {
+    const market = marketAt(siteId);
+    if (!market) return false;
+
+    this.openTrade(market);
+    if (!this.trade.isOpen) return false;
+
+    const paid = this.payBounty(market);
+    this.closeTrade();
+    return paid;
+  }
+
   // ── Сохранение и загрузка ─────────────────────────────────────────────────
 
   /**
@@ -1487,6 +1749,7 @@ export class Game {
       reputation: this.reputation.serialize(),
       quests: this.quests.serialize(),
       economy: this.economy.serialize(),
+      bounty: this.bounty.serialize(),
       actors: actors.map((actor) => actor.serialize()),
       caravans: this.caravans.caravans.map((caravan) => ({
         owner: caravan.owner,
@@ -1527,6 +1790,12 @@ export class Game {
     this.reputation.restore(save.reputation);
     this.quests.restore(save.quests);
     this.economy.restore(save.economy);
+
+    // Награда за голову: она в снимке есть, а вот отряды охотников — нет.
+    // Отряд в пути состояние сиюминутное; награда осталась, значит, новый
+    // выйдет сам. Убираем встречи по той же причине.
+    this.bounty.restore(save.bounty);
+    this.encounters.clear();
 
     // Население: старое убираем целиком, новое поднимаем из снимка.
     this.squad.length = 0;
