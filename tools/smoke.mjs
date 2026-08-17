@@ -236,6 +236,94 @@ async function main() {
       `бинтов в мешке ${bandaged.bandages}`,
   );
 
+  // ── Грабим корован ────────────────────────────────────────────────────────
+  await page.evaluate(() => window.__game.healPlayer());
+
+  const caravan = await page.evaluate(() => {
+    window.__game.spawnCaravan('palace-village');
+    return window.__game.goToCaravan();
+  });
+  await page.waitForTimeout(2600);
+  await page.screenshot({ path: join(outDir, 'caravan.png') });
+
+  console.log(
+    `→ корован ${caravan.from} → ${caravan.to}: ${caravan.cargo}, ` +
+      `золота ${caravan.gold}, охраны ${caravan.guards}, на добро ${caravan.cargoValue} зол.`,
+  );
+  if (!caravan || caravan.guards === 0) failures.push('корован вышел без сопровождения');
+  if (!caravan.cargo || caravan.cargo === 'телега пуста') failures.push('корован вышел порожняком');
+
+  const onRoad = await page.evaluate(() => window.__game.onRoad());
+  console.log(`→ телега стоит ${onRoad ? 'на тракте' : 'в стороне от тракта'}`);
+
+  const goldBefore = await page.evaluate(() => window.__game.player().gold);
+
+  // Засада: подходим вплотную, рубим сопровождение, подлечиваясь между заходами.
+  for (let i = 0; i < 70; i++) {
+    const done = await page.evaluate(() => {
+      window.__game.healPlayer();
+      const id = window.__game.approachNearest('torso', 45);
+      if (id === null) return true;
+      window.__game.attack();
+      return false;
+    });
+    if (done) break;
+    await page.waitForTimeout(180);
+  }
+  await page.waitForTimeout(600);
+
+  // Возвращаемся к телеге: во время драки мы гонялись за охраной по тракту.
+  await page.evaluate(() => window.__game.goToCaravan());
+  await page.waitForTimeout(700);
+
+  const afterFight = await page.evaluate(() => window.__game.nearestCaravan());
+  console.log(
+    `→ после засады: состояние «${afterFight.state}», охраны рядом ${afterFight.defenders ? 'есть' : 'нет'}, ` +
+      `живых сопровождающих ${afterFight.guards}`,
+  );
+
+  const plundered = await page.evaluate(() => window.__game.plunder());
+  await page.waitForTimeout(500);
+  await page.screenshot({ path: join(outDir, 'caravan-plundered.png') });
+
+  if (!plundered) failures.push('телегу не удалось обыскать после разгрома охраны');
+
+  const afterRobbery = await page.evaluate(() => window.__game.economy());
+  const goldAfter = afterRobbery.gold;
+  console.log(`→ после грабежа золота ${goldBefore} → ${goldAfter}`);
+  if (goldAfter <= goldBefore) failures.push('грабёж корована не принёс золота');
+
+  // Груз не доехал — в городе назначения на него подскочила цена.
+  const shortage = afterRobbery.shortages?.village ?? {};
+  const spiked = Object.entries(shortage).filter(([, value]) => value > 0);
+  console.log(
+    spiked.length > 0
+      ? `→ в Тихом Броде подорожало: ${spiked.map(([id, value]) => `${id} +${Math.round(value * 100)}%`).join(', ')}`
+      : '→ дефицита в городе назначения не возникло',
+  );
+  if (spiked.length === 0) failures.push('недоехавший груз не поднял цены в городе назначения');
+
+  const reputationAfter = afterRobbery.reputation ?? {};
+  console.log(`→ репутация после грабежа: ${JSON.stringify(reputationAfter)}`);
+  if (!Object.values(reputationAfter).some((value) => value < 0)) {
+    failures.push('после грабежа ни с кем не испортились отношения');
+  }
+
+  // ── Прилавок ──────────────────────────────────────────────────────────────
+  await page.evaluate(() => window.__game.openTrade('village'));
+  await page.waitForTimeout(700);
+  await page.screenshot({ path: join(outDir, 'trade.png') });
+
+  const tradeVisible = await page.evaluate(() => {
+    const screen = document.getElementById('trade-screen');
+    return screen ? getComputedStyle(screen).display !== 'none' : false;
+  });
+  if (!tradeVisible) failures.push('экран торговли не открылся');
+  console.log(`→ прилавок ${tradeVisible ? 'открыт' : 'не открылся'}`);
+
+  await page.evaluate(() => window.__game.closeTrade());
+  await page.waitForTimeout(300);
+
   // Ночной кадр — заодно проверяем, что смена суток не роняет шейдеры.
   await page.evaluate(() => {
     window.__game.teleport(-470, 40);

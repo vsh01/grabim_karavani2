@@ -17,6 +17,8 @@ export interface PlayerWorld {
   terrain: Terrain;
   forest?: Forest;
   colliders?: CollisionWorld;
+  /** Дороги: по накатанному коляска едет заметно бодрее. */
+  roads?: { isOnRoad(x: number, z: number): boolean };
 }
 
 export interface PlayerHit {
@@ -169,9 +171,13 @@ export class Player {
     this.sprinting = params.walk !== params.sprint && input.isDown('ShiftLeft') && this.axis.z < 0;
     let speed = (this.sprinting ? params.sprint : params.walk) * this.speedMultiplier;
 
-    // Склон режет скорость: круче — медленнее. Для коляски это почти приговор.
+    // Склон режет скорость: круче — медленнее. Для коляски это почти приговор,
+    // но ровный тракт её спасает — именно на дорогах она и имеет смысл.
     const slope = world.terrain.slopeAt(this.body.position.x, this.body.position.z);
-    speed *= Math.max(0.12, 1 - slope * params.slopePenalty);
+    const onRoad = world.roads?.isOnRoad(this.body.position.x, this.body.position.z) ?? false;
+    const penalty = onRoad ? params.slopePenalty * 0.3 : params.slopePenalty;
+    speed *= Math.max(0.12, 1 - slope * penalty);
+    if (onRoad && this.mode === MovementMode.Wheelchair) speed *= 1.25;
 
     // По воде не побегаешь.
     if (this.body.position.y < WATER_LEVEL + 0.3) speed *= 0.55;

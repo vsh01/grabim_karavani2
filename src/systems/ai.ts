@@ -202,6 +202,26 @@ function flee(actor: Actor, threat: Threat, dt: number, world: AiWorld): void {
 
 /** Обычная жизнь: походить по своему участку и постоять. */
 function patrol(actor: Actor, dt: number, world: AiWorld): void {
+  // Сопровождение корована держится телеги, а не своего участка.
+  if (actor.hasEscortAnchor) {
+    actor.state = AiState.Follow;
+    const distance = distance2D(actor.position.x, actor.position.z, actor.escortAnchor.x, actor.escortAnchor.z);
+
+    if (distance < 1.6) {
+      actor.desiredVelocity.set(0, 0, 0);
+      applySeparation(actor, world);
+      // На ходу смотрят вперёд, по направлению обоза.
+      actor.faceTowards(actor.escortAnchor.x, actor.escortAnchor.z, dt, 2);
+      return;
+    }
+
+    // Отстал — догоняет бегом, идёт рядом — шагом.
+    const speed = distance > 9 ? actor.chaseSpeed : actor.maxSpeed * 0.8;
+    actor.faceTowards(actor.escortAnchor.x, actor.escortAnchor.z, dt, 4);
+    moveTowards(actor, actor.escortAnchor.x, actor.escortAnchor.z, speed, world);
+    return;
+  }
+
   if (actor.role === 'guard' || actor.role === 'commander' || actor.role === 'merchant') {
     // Часовой стоит на посту и только осматривается.
     actor.state = AiState.Hold;

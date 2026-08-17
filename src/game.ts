@@ -5,6 +5,7 @@ import { Terrain } from './world/terrain';
 import { Forest } from './world/forest';
 import { Sky } from './world/sky';
 import { ZONES, zoneAt } from './world/zones';
+import { RoadNetwork } from './world/roads';
 import { Player } from './entities/player';
 import { BodyPart, LIMBS, PART_NAMES } from './entities/body';
 import { Actor } from './entities/actor';
@@ -13,7 +14,14 @@ import { BloodEffects } from './systems/effects';
 import { CombatSystem, type CombatEvent, type CombatTargets } from './systems/combat';
 import { Population, populateWorld } from './systems/population';
 import type { AiWorld } from './systems/ai';
-import { Faction, baseHostility } from './data/factions';
+import { Caravan } from './entities/caravan';
+import { CaravanSystem } from './systems/caravans';
+import { Economy, MARKETS, marketAt, stackValue, type Market } from './systems/economy';
+import { Reputation } from './systems/reputation';
+import { TradeScreen } from './ui/tradeScreen';
+import { tryItem, type ItemDef } from './data/items';
+import { Faction, FACTIONS } from './data/factions';
+import { getSite } from './world/sites';
 import { DebugHud } from './ui/debugHud';
 import { Hud } from './ui/hud';
 import { DamageOverlay } from './ui/damageOverlay';
@@ -31,6 +39,17 @@ const SPAWN = { x: -470, z: 40 };
 
 /** На каком расстоянии можно обыскать труп или заговорить. */
 const INTERACT_RANGE = 2.6;
+/** Телега большая — до неё дотягиваемся дальше. */
+const CARAVAN_RANGE = 4.5;
+/** Сколько берёт лекарь за полное лечение. */
+const HEAL_COST = 45;
+
+/** Что сейчас под прицелом и что случится по нажатию E. */
+type Interaction =
+  | null
+  | { kind: 'corpse'; actor: Actor }
+  | { kind: 'caravan'; caravan: Caravan }
+  | { kind: 'trade'; actor: Actor; market: Market };
 
 /**
  * Игра целиком: сцена, мир, игрок, бой и главный цикл.
@@ -46,12 +65,17 @@ export class Game {
   readonly hud = new Hud();
   readonly overlay = new DamageOverlay();
   readonly blood = new BloodEffects();
+  readonly trade = new TradeScreen();
+  readonly economy = new Economy();
 
   terrain!: Terrain;
   forest!: Forest;
+  roads!: RoadNetwork;
   player!: Player;
   population!: Population;
   combat!: CombatSystem;
+  caravans!: CaravanSystem;
+  reputation!: Reputation;
 
   private running = false;
   private lastTime = 0;
@@ -61,7 +85,7 @@ export class Game {
   private readonly tint = new THREE.Color();
   private targets!: CombatTargets;
   private aiWorld!: AiWorld;
-  private interactionTarget: Actor | null = null;
+  private interaction: Interaction = null;
 
   private constructor(private readonly options: GameOptions) {
     this.renderer = new THREE.WebGLRenderer({
@@ -97,30 +121,45 @@ export class Game {
     await progress(8, 'Поднимаем горы и роем долины…');
     this.terrain = new Terrain();
 
-    await progress(26, 'Режем землю на куски…');
+    await progress(20, 'Прокладываем тракты…');
+    // Дороги режут рельеф под себя, поэтому строятся до того, как земля
+    // превращается в геометрию, и до того, как высажен лес.
+    this.roads = new RoadNetwork(this.terrain);
+    this.roads.carveInto(this.terrain);
+    this.terrain.roadMask = (x, z) => this.roads.maskAt(x, z);
+
+    await progress(30, 'Режем землю на куски…');
     this.scene.add(this.terrain.build());
 
     await progress(44, 'Сажаем лес…');
-    this.forest = new Forest(this.terrain, seed);
+    this.forest = new Forest(this.terrain, seed, this.roads);
 
     await progress(66, 'Фотографируем деревья для дальнего плана…');
     this.forest.build(this.renderer);
     this.scene.add(this.forest.group);
 
-    await progress(82, 'Расселяем эльфов, стражу и разбойников…');
+    await progress(80, 'Расселяем эльфов, стражу и разбойников…');
     this.population = new Population(this.terrain);
     populateWorld(this.population, this.terrain, this.forest, seed);
+    this.spawnMerchants();
     this.scene.add(this.population.group);
 
-    await progress(94, 'Точим оружие…');
+    await progress(92, 'Точим оружие…');
     this.player = new Player(SPAWN.x, SPAWN.z, this.terrain);
     this.player.yaw = Math.PI * 0.15;
     this.player.faction = Faction.Elves;
     this.player.characterName = 'Безымянный';
+    this.reputation = new Reputation(this.player.faction);
     this.giveStartingKit();
 
     this.combat = new CombatSystem(this.terrain, this.blood, this.handleCombatEvent);
     this.scene.add(this.combat.group);
+
+    await progress(97, 'Выпускаем корованы на тракт…');
+    this.caravans = new CaravanSystem(this.roads, this.terrain, this.population, seed);
+    this.scene.add(this.caravans.group);
+    // Первый обоз выходит сразу, чтобы дорога не была пустой на старте.
+    this.caravans.spawnCaravan();
 
     this.targets = { actors: this.population.actors, player: this.player };
     this.aiWorld = {
@@ -130,11 +169,29 @@ export class Game {
       player: this.player,
       combat: this.combat,
       targets: this.targets,
-      playerHostility: (faction) => baseHostility(faction, this.player.faction),
+      playerHostility: (faction) => this.reputation.hostilityTowardsPlayer(faction, this.player.faction),
     };
 
     this.forest.update(this.player.position, true);
     await progress(100, 'Готово');
+  }
+
+  /** Поставить по торговцу на каждый прилавок. */
+  private spawnMerchants(): void {
+    for (const market of MARKETS) {
+      const site = getSite(market.siteId);
+      const merchant = this.population.spawn({
+        faction: market.owner,
+        x: site.x + 6,
+        z: site.z + 6,
+        role: 'merchant',
+        name: market.healer ? 'торговец и лекарь' : 'скупщик',
+        weapon: 'dagger',
+        gold: 400,
+        shopSiteId: market.siteId,
+      });
+      merchant.homeRadius = 4;
+    }
   }
 
   private giveStartingKit(): void {
@@ -172,14 +229,15 @@ export class Game {
     overlay.innerHTML = `
       <div style="font-size:24px;letter-spacing:0.05em;color:#d9b45a">Нажмите, чтобы играть</div>
       <div style="opacity:0.8">WASD — идти · Shift — бежать · Пробел — прыжок · мышь — смотреть</div>
-      <div style="opacity:0.8">ЛКМ — удар · R — перевязать · E — обыскать · 1…4 — оружие</div>
+      <div style="opacity:0.8">ЛКМ — удар · R — перевязать · E — обыскать и торговать · Tab — мешок</div>
       <div style="opacity:0.5;font-size:13px">Esc — освободить курсор · F3 — служебная панель</div>
     `;
     overlay.addEventListener('click', () => this.input.requestPointerLock());
     document.body.appendChild(overlay);
 
     this.input.onPointerLockChange((locked) => {
-      overlay.style.display = locked ? 'none' : 'flex';
+      // Пока открыт прилавок, заставка «нажмите, чтобы играть» только мешает.
+      overlay.style.display = locked || this.trade.isOpen ? 'none' : 'flex';
       this.input.enabled = locked;
     });
 
@@ -245,9 +303,12 @@ export class Game {
       terrain: this.terrain,
       forest: this.forest,
       colliders: this.colliders,
+      roads: this.roads,
     });
 
     this.population.update(dt, this.aiWorld, this.player.position);
+    this.caravans.update(dt);
+    this.economy.update(dt);
     this.combat.update(dt, this.targets);
     this.blood.update(dt, (x, z) => this.terrain.heightAt(x, z));
 
@@ -263,11 +324,18 @@ export class Game {
 
   /** Обработка того, что игрок нажал: удар, перевязка, обыск, смена оружия. */
   private handlePlayerActions(): void {
+    // Пока открыт мешок или прилавок, мир ждёт: бить и ходить нельзя.
+    if (this.trade.isOpen) {
+      if (this.input.justPressedRaw('Escape') || this.input.justPressedRaw('Tab')) this.closeTrade();
+      return;
+    }
+
     if (!this.player.wounds.alive) {
       if (this.input.justPressedRaw('Space')) this.respawn();
       return;
     }
 
+    if (this.input.justPressed('Tab')) this.openBag();
     if (this.input.mouseJustPressed(0)) this.attack();
     if (this.input.justPressed('KeyR')) this.bandage();
     if (this.input.justPressed('KeyE')) this.interact();
@@ -309,10 +377,23 @@ export class Game {
     this.hud.log(part ? `Перевязано: ${PART_NAMES[part]}` : 'Перевязано', 'good');
   }
 
+  /** Нажали E: обыскать труп, ограбить корован или заговорить с торговцем. */
   private interact(): void {
-    const target = this.interactionTarget;
+    const target = this.interaction;
     if (!target) return;
 
+    if (target.kind === 'corpse') {
+      this.lootCorpse(target.actor);
+      return;
+    }
+    if (target.kind === 'caravan') {
+      this.plunderCaravan(target.caravan);
+      return;
+    }
+    this.openTrade(target.market);
+  }
+
+  private lootCorpse(target: Actor): void {
     const loot = target.lootTable();
     this.player.inventory.gold += loot.gold;
     for (const id of loot.items) this.player.inventory.add(id);
@@ -326,6 +407,40 @@ export class Game {
         : 'Ничего ценного',
       'good',
     );
+  }
+
+  /**
+   * Ограбить корован.
+   *
+   * Это не только мешки в карман. Хозяин обоза запомнит, маршрут станет опаснее,
+   * а в городе, куда груз не доехал, на него подскочит цена — и продать его там
+   * будет выгоднее всего, но и искать вас будут именно там.
+   */
+  private plunderCaravan(caravan: Caravan): void {
+    const loot = caravan.plunder();
+    const value = stackValue(loot.cargo);
+
+    this.player.inventory.gold += loot.gold;
+    for (const entry of loot.cargo) this.player.inventory.add(entry.id, entry.count);
+
+    this.economy.registerLostCargo(caravan.toSite, loot.cargo);
+    this.caravans.registerRobbery(caravan);
+
+    // Обиделся хозяин груза; те, кто с ним враждует, наоборот, довольны.
+    this.reputation.change(caravan.owner, -22);
+    if (caravan.owner !== Faction.Neutral) this.reputation.change(Faction.Neutral, -6);
+
+    const goods = loot.cargo.map((entry) => `${tryItem(entry.id)?.name ?? entry.id} ×${entry.count}`).join(', ');
+    this.hud.log(`Корован ограблен: ${loot.gold} золота${goods ? `, ${goods}` : ''}`, 'good');
+    this.hud.log(
+      `${FACTIONS[caravan.owner].name}: отношение ухудшилось (${this.reputation.describe(caravan.owner)})`,
+      'bad',
+    );
+
+    const best = this.economy.bestMarketFor(loot.cargo[0]?.id ?? 'grain', this.reputation);
+    if (best && value > 0) {
+      this.hud.log(`Сбыть добычу дороже всего в: ${best.market.name}`, 'plain');
+    }
   }
 
   private selectWeapon(index: number): void {
@@ -397,7 +512,7 @@ export class Game {
       wounds: this.player.wounds,
       inventory: this.player.inventory,
       mode: this.player.mode,
-      interactionHint: this.interactionTarget ? `E — обыскать (${this.interactionTarget.name})` : null,
+      interactionHint: this.interactionHint(),
       zoneName: ZONES[zoneAt(position.x, position.z)].name,
       clock: this.sky.clockLabel,
     });
@@ -406,13 +521,214 @@ export class Game {
     this.updateDebug();
   }
 
+  /**
+   * Что сейчас в пределах вытянутой руки.
+   * Порядок важен: телега перекрывает труп, а живой торговец — обоих.
+   */
   private findInteractionTarget(): void {
-    this.interactionTarget = this.population.nearest(
-      this.player.position.x,
-      this.player.position.z,
-      INTERACT_RANGE,
-      (actor) => !actor.alive,
+    const { x, z } = this.player.position;
+
+    const merchant = this.population.nearest(
+      x,
+      z,
+      INTERACT_RANGE + 1.4,
+      (actor) => actor.alive && actor.shopSiteId !== null,
     );
+    if (merchant?.shopSiteId) {
+      const market = marketAt(merchant.shopSiteId);
+      if (market) {
+        this.interaction = { kind: 'trade', actor: merchant, market };
+        return;
+      }
+    }
+
+    const caravan = this.caravans.nearestPlunderable(x, z, CARAVAN_RANGE);
+    if (caravan) {
+      this.interaction = { kind: 'caravan', caravan };
+      return;
+    }
+
+    const corpse = this.population.nearest(x, z, INTERACT_RANGE, (actor) => !actor.alive);
+    this.interaction = corpse ? { kind: 'corpse', actor: corpse } : null;
+  }
+
+  private interactionHint(): string | null {
+    const target = this.interaction;
+    if (!target) return null;
+
+    if (target.kind === 'corpse') return `E — обыскать (${target.actor.name})`;
+    if (target.kind === 'caravan') return `E — ограбить корован (${target.caravan.describeCargo()})`;
+    if (!this.reputation.willTrade(target.market.owner)) return `${target.market.name}: с вами не торгуют`;
+    return `E — торговать (${target.market.name})`;
+  }
+
+  // ── Торговля ───────────────────────────────────────────────────────────────
+
+  /** Открыть просто мешок, без прилавка. */
+  openBag(): void {
+    this.showTradeScreen(undefined);
+  }
+
+  openTrade(market: Market): void {
+    if (!this.reputation.willTrade(market.owner)) {
+      this.hud.log(`${market.name}: с вами не желают иметь дела`, 'bad');
+      return;
+    }
+    this.showTradeScreen(market);
+  }
+
+  private showTradeScreen(market: Market | undefined): void {
+    this.player.controlEnabled = false;
+
+    this.trade.open({
+      inventory: this.player.inventory,
+      wounds: this.player.wounds,
+      economy: this.economy,
+      reputation: this.reputation,
+      market,
+      healCost: HEAL_COST,
+      actions: {
+        buy: (def) => this.buyItem(def, market),
+        sell: (def) => this.sellItem(def, market),
+        use: (def) => this.useItem(def),
+        equip: (def) => this.equipItem(def),
+        heal: () => this.buyHealing(market),
+        close: () => this.closeTrade(),
+      },
+    });
+
+    // Указатель освобождаем после открытия: обработчик захвата смотрит на
+    // trade.isOpen и не показывает заставку поверх прилавка.
+    this.input.exitPointerLock();
+    this.lockOverlay.style.display = 'none';
+  }
+
+  closeTrade(): void {
+    this.trade.close();
+    this.player.syncWithWounds();
+    this.lockOverlay.style.display = 'flex';
+  }
+
+  private buyItem(def: ItemDef, market: Market | undefined): void {
+    if (!market) return;
+    const price = this.economy.buyPrice(def.id, market.siteId, this.reputation);
+    if (this.player.inventory.gold < price) {
+      this.hud.log('Не хватает золота', 'bad');
+      return;
+    }
+
+    this.player.inventory.gold -= price;
+    this.player.inventory.add(def.id);
+    this.hud.log(`Куплено: ${def.name} за ${price}`, 'plain');
+
+    // Протез покупают не в мешок, а сразу на себя.
+    if (def.prostheticFor || def.wheelchair) this.useItem(def);
+  }
+
+  private sellItem(def: ItemDef, market: Market | undefined): void {
+    if (!market) return;
+    if (!this.player.inventory.remove(def.id, 1)) return;
+
+    const price = this.economy.sellPrice(def.id, market.siteId, this.reputation);
+    this.player.inventory.gold += price;
+
+    if (this.player.inventory.equippedWeapon === def.id && !this.player.inventory.has(def.id)) {
+      this.player.inventory.equippedWeapon = 'fists';
+    }
+    if (this.player.inventory.equippedArmor === def.id && !this.player.inventory.has(def.id)) {
+      this.player.inventory.equippedArmor = null;
+    }
+
+    this.hud.log(`Продано: ${def.name} за ${price}`, 'plain');
+  }
+
+  /** Применить предмет: перевязка, мазь, протез, коляска. */
+  private useItem(def: ItemDef): void {
+    const wounds = this.player.wounds;
+
+    if (def.wheelchair) {
+      if (!this.player.inventory.remove(def.id, 1)) return;
+      wounds.hasWheelchair = true;
+      this.player.syncWithWounds();
+      this.hud.log('Коляска собрана. По тракту снова можно двигаться.', 'good');
+      return;
+    }
+
+    if (def.prostheticFor) {
+      const part = this.findPartForProsthetic(def.prostheticFor);
+      if (!part) {
+        this.hud.log(`${def.name}: ставить некуда`, 'bad');
+        return;
+      }
+      if (!this.player.inventory.remove(def.id, 1)) return;
+      wounds.attachProsthetic(part);
+      this.player.syncWithWounds();
+      this.hud.log(`${PART_NAMES[part]}: поставлен протез (${def.name})`, 'good');
+      return;
+    }
+
+    if (def.bandage) {
+      if (!wounds.isBleeding) {
+        this.hud.log('Кровотечения нет', 'plain');
+        return;
+      }
+      if (!this.player.inventory.remove(def.id, 1)) return;
+      const part = wounds.bandage();
+      this.hud.log(part ? `Перевязано: ${PART_NAMES[part]}` : 'Перевязано', 'good');
+      return;
+    }
+
+    if (def.heal) {
+      if (!this.player.inventory.remove(def.id, 1)) return;
+      wounds.heal(def.heal);
+      this.player.syncWithWounds();
+      this.hud.log(`${def.name}: раны затянулись`, 'good');
+    }
+  }
+
+  /** Куда поставить протез: ищем подходящую отрубленную часть. */
+  private findPartForProsthetic(kind: 'arm' | 'leg' | 'eye'): BodyPart | null {
+    const candidates =
+      kind === 'arm'
+        ? [BodyPart.RightArm, BodyPart.LeftArm]
+        : kind === 'leg'
+          ? [BodyPart.RightLeg, BodyPart.LeftLeg]
+          : [BodyPart.RightEye, BodyPart.LeftEye];
+
+    for (const part of candidates) {
+      const status = this.player.wounds.get(part);
+      if (status.severed && !status.prosthetic) return part;
+    }
+    return null;
+  }
+
+  private equipItem(def: ItemDef): void {
+    if (def.kind === 'armor') {
+      this.player.inventory.equippedArmor = def.id;
+      this.hud.log(`Надето: ${def.name}`, 'plain');
+      return;
+    }
+    if (def.weapon?.twoHanded && !this.player.wounds.canUseTwoHanded) {
+      this.hud.log(`${def.name}: нужны обе руки`, 'bad');
+      return;
+    }
+    this.player.inventory.equippedWeapon = def.id;
+    this.hud.log(`В руках: ${def.name}`, 'plain');
+  }
+
+  private buyHealing(market: Market | undefined): void {
+    if (!market?.healer) return;
+    const wounds = this.player.wounds;
+    if (wounds.vitality >= 0.999 && !wounds.isBleeding) return;
+    if (this.player.inventory.gold < HEAL_COST) {
+      this.hud.log('Не хватает золота на лекаря', 'bad');
+      return;
+    }
+
+    this.player.inventory.gold -= HEAL_COST;
+    wounds.heal(200);
+    this.player.syncWithWounds();
+    this.hud.log('Лекарь заштопал раны. Отрубленное он вернуть не может.', 'good');
   }
 
   private updateDebug(): void {
@@ -526,6 +842,155 @@ export class Game {
       gold: this.player.inventory.gold,
       bandages: this.player.inventory.count('bandage'),
       weapon: this.player.inventory.weapon.name,
+    };
+  }
+
+  /** Полностью вылечить игрока — чтобы автотест мог довести бой до конца. */
+  debugHealPlayer(): void {
+    this.player.wounds.heal(300);
+    this.player.wounds.blood = 100;
+    this.player.syncWithWounds();
+  }
+
+  /**
+   * Навести прицел на ближайшего живого противника.
+   * Возвращает его номер или null, если рядом никого нет.
+   */
+  debugAimAtNearest(part: BodyPart, radius = 14): number | null {
+    const target = this.population.nearest(
+      this.player.position.x,
+      this.player.position.z,
+      radius,
+      (actor) => actor.alive && actor.shopSiteId === null,
+    );
+    if (!target) return null;
+    return this.debugAimAt(target.id, part) ? target.id : null;
+  }
+
+  /**
+   * Подойти вплотную к ближайшему противнику и прицелиться.
+   *
+   * В обычной игре к цели подходят ногами; автотесту негде нажимать W, а
+   * ближний бой достаёт всего на два метра — поэтому сближение вынесено сюда.
+   */
+  debugApproachNearest(part: BodyPart, radius = 40): number | null {
+    const target = this.population.nearest(
+      this.player.position.x,
+      this.player.position.z,
+      radius,
+      (actor) => actor.alive && actor.shopSiteId === null,
+    );
+    if (!target) return null;
+
+    // Встаём в полутора метрах от цели, со стороны, откуда пришли.
+    const dx = this.player.position.x - target.position.x;
+    const dz = this.player.position.z - target.position.z;
+    const length = Math.hypot(dx, dz) || 1;
+    this.player.teleport(
+      target.position.x + (dx / length) * 1.5,
+      target.position.z + (dz / length) * 1.5,
+      this.terrain,
+    );
+
+    return this.debugAimAt(target.id, part) ? target.id : null;
+  }
+
+  /** Выпустить корован немедленно и вернуть его сводку. */
+  debugSpawnCaravan(routeId?: string): Record<string, unknown> | null {
+    const caravan = this.caravans.spawnCaravan(routeId);
+    if (!caravan) return null;
+    return this.describeCaravan(caravan);
+  }
+
+  /** Перенести игрока к ближайшему обозу. */
+  debugGoToCaravan(): Record<string, unknown> | null {
+    const caravan = this.caravans.nearest(this.player.position.x, this.player.position.z);
+    if (!caravan) return null;
+
+    this.player.teleport(caravan.position.x + 6, caravan.position.z + 6, this.terrain);
+    this.debugLookAtCaravan(caravan);
+    this.forest.update(this.player.position, true);
+    return this.describeCaravan(caravan);
+  }
+
+  private debugLookAtCaravan(caravan: Caravan): void {
+    const dx = caravan.position.x - this.player.position.x;
+    const dz = caravan.position.z - this.player.position.z;
+    this.player.yaw = Math.atan2(-dx, -dz);
+    this.player.pitch = -0.05;
+  }
+
+  /** Сводка по ближайшему обозу, без перемещения игрока. */
+  debugNearestCaravan(): Record<string, unknown> | null {
+    const caravan = this.caravans.nearest(this.player.position.x, this.player.position.z);
+    return caravan ? this.describeCaravan(caravan) : null;
+  }
+
+  /** Обыскать ближайшую телегу, до которой дотягиваемся. */
+  debugPlunder(): boolean {
+    const caravan = this.caravans.nearestPlunderable(
+      this.player.position.x,
+      this.player.position.z,
+      CARAVAN_RANGE + 6,
+    );
+    if (!caravan) return false;
+    this.plunderCaravan(caravan);
+    return true;
+  }
+
+  /** Открыть прилавок указанного узла, где бы игрок ни стоял. */
+  debugOpenTrade(siteId: string): boolean {
+    const market = marketAt(siteId);
+    if (!market) return false;
+    this.openTrade(market);
+    return true;
+  }
+
+  private describeCaravan(caravan: Caravan): Record<string, unknown> {
+    return {
+      id: caravan.id,
+      owner: caravan.owner,
+      from: caravan.fromSite,
+      to: caravan.toSite,
+      state: caravan.state,
+      cargo: caravan.describeCargo(),
+      cargoValue: stackValue(caravan.cargo),
+      gold: caravan.gold,
+      guards: caravan.members.filter((member) => member.alive).length,
+      defenders: caravan.hasDefenders,
+      plunderable: caravan.isPlunderable,
+      position: { x: caravan.position.x, z: caravan.position.z },
+    };
+  }
+
+  /** Состояние торговли и репутации. */
+  economyReport(): Record<string, unknown> {
+    return {
+      reputation: Object.fromEntries(
+        MARKETS.map((market) => [market.owner, this.reputation.get(market.owner)]),
+      ),
+      caravans: this.caravans.caravans.map((caravan) => this.describeCaravan(caravan)),
+      prices: Object.fromEntries(
+        MARKETS.map((market) => [
+          market.siteId,
+          {
+            silk: this.economy.buyPrice('silk', market.siteId, this.reputation),
+            furs: this.economy.sellPrice('furs', market.siteId, this.reputation),
+          },
+        ]),
+      ),
+      shortages: Object.fromEntries(
+        MARKETS.map((market) => [
+          market.siteId,
+          Object.fromEntries(
+            ['grain', 'salt', 'wine', 'silk', 'spices', 'furs', 'iron'].map((id) => [
+              id,
+              Number(this.economy.shortageOf(market.siteId, id).toFixed(3)),
+            ]),
+          ),
+        ]),
+      ),
+      gold: this.player.inventory.gold,
     };
   }
 

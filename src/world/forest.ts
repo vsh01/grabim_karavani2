@@ -34,6 +34,8 @@ const FAR_REBUILD_DISTANCE = 40;
 
 const MAX_SLOPE = 0.45;
 const TREE_LINE = 118;
+/** Насколько широко лес расступается вдоль дороги, метры. */
+const ROAD_CLEARANCE = 8.5;
 
 interface ForestChunk {
   cx: number;
@@ -151,7 +153,15 @@ export class Forest {
 
   private treeTotal = 0;
 
-  constructor(private readonly terrain: Terrain, private readonly seed: number) {
+  /**
+   * @param roads сеть дорог: вдоль тракта лес расступается. Может отсутствовать —
+   *              тогда деревья растут везде, где позволяет рельеф.
+   */
+  constructor(
+    private readonly terrain: Terrain,
+    private readonly seed: number,
+    private readonly roads?: { distanceTo(x: number, z: number, limit?: number): number },
+  ) {
     this.group.name = 'forest';
     this.scatter();
   }
@@ -202,6 +212,8 @@ export class Forest {
         if (height > TREE_LINE) continue;
         if (this.terrain.slopeAt(px, pz) > MAX_SLOPE) continue;
         if (this.insideClearing(px, pz)) continue;
+        // Обочина тракта: дорогу не должно затягивать подлеском.
+        if (this.roads && this.roads.distanceTo(px, pz, ROAD_CLEARANCE) < ROAD_CLEARANCE) continue;
 
         const weights = zoneWeights(px, pz);
         for (let s = 0; s < SPECIES_COUNT; s++) {

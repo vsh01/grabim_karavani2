@@ -24,6 +24,7 @@ const COLOR_GRASS_VILLAIN = new THREE.Color(0x5a5240);
 const COLOR_ROCK = new THREE.Color(0x5d5952);
 const COLOR_SNOW = new THREE.Color(0xd7dde2);
 const COLOR_DIRT = new THREE.Color(0x6b5638);
+const COLOR_ROAD = new THREE.Color(0x8a7550);
 
 /**
  * Мелкий рельеф, общий для всей карты: бугры, промоины, складки.
@@ -108,6 +109,13 @@ export class Terrain {
   private groundTexture?: THREE.Texture;
   private waterMesh?: THREE.Mesh;
 
+  /**
+   * Насколько сильно точка занята дорогой: 0 — целина, 1 — накатанный тракт.
+   * Задаётся сетью дорог до построения геометрии, чтобы полотно попало в цвет
+   * вершин. Вызывается только при загрузке, поэтому дешевизна тут не критична.
+   */
+  roadMask?: (x: number, z: number) => number;
+
   constructor() {
     this.heights = new Float32Array(VERTS * VERTS);
     this.group.name = 'terrain';
@@ -181,6 +189,61 @@ export class Terrain {
     return baseHeight(x, z);
   }
 
+  /**
+   * Прорезать в рельефе полотно вдоль ломаной.
+   *
+   * Дорога не карабкается по склону — она его срезает. Благодаря этому корован
+   * никогда не упирается в стену, а игрок видит настоящий тракт, а не полосу
+   * краски по холмам. Вызывать до build(): геометрия строится один раз.
+   *
+   * @param path точки пути с уже назначенными высотами
+   * @param halfWidth половина ширины ровной части, метры
+   * @param shoulder ширина обочины, на которой рельеф плавно возвращается
+   */
+  carvePath(
+    path: readonly { x: number; z: number; y: number }[],
+    halfWidth: number,
+    shoulder: number,
+  ): void {
+    if (path.length < 2) return;
+    const { heights } = this;
+    const reach = halfWidth + shoulder;
+
+    for (let s = 0; s < path.length - 1; s++) {
+      const a = path[s];
+      const b = path[s + 1];
+
+      const minI = Math.max(0, Math.floor((Math.min(a.x, b.x) - reach + WORLD_HALF) / CELL_SIZE));
+      const maxI = Math.min(VERTS - 1, Math.ceil((Math.max(a.x, b.x) + reach + WORLD_HALF) / CELL_SIZE));
+      const minJ = Math.max(0, Math.floor((Math.min(a.z, b.z) - reach + WORLD_HALF) / CELL_SIZE));
+      const maxJ = Math.min(VERTS - 1, Math.ceil((Math.max(a.z, b.z) + reach + WORLD_HALF) / CELL_SIZE));
+
+      const abx = b.x - a.x;
+      const abz = b.z - a.z;
+      const lengthSq = abx * abx + abz * abz;
+      if (lengthSq < 1e-6) continue;
+
+      for (let j = minJ; j <= maxJ; j++) {
+        const z = j * CELL_SIZE - WORLD_HALF;
+        for (let i = minI; i <= maxI; i++) {
+          const x = i * CELL_SIZE - WORLD_HALF;
+
+          // Ближайшая точка отрезка и высота дороги в ней.
+          const t = clamp(((x - a.x) * abx + (z - a.z) * abz) / lengthSq, 0, 1);
+          const nearestX = a.x + abx * t;
+          const nearestZ = a.z + abz * t;
+          const distance = Math.hypot(x - nearestX, z - nearestZ);
+          if (distance > reach) continue;
+
+          const roadHeight = a.y + (b.y - a.y) * t;
+          const strength = 1 - smoothstep(halfWidth, reach, distance);
+          const index = j * VERTS + i;
+          heights[index] += (roadHeight - heights[index]) * strength;
+        }
+      }
+    }
+  }
+
   /** Значение из высотной карты по индексам узла. */
   private node(i: number, j: number): number {
     const ci = clamp(i, 0, VERTS - 1) | 0;
@@ -250,6 +313,10 @@ export class Terrain {
     // Пятна земли, чтобы трава не была однотонной простынёй.
     const patch = fbm2d(x * 0.02, z * 0.02, { octaves: 2, seed: 77 });
     out.lerp(COLOR_DIRT, smoothstep(0.55, 0.85, patch) * 0.35);
+
+    // Накатанная колея поверх травы.
+    const road = this.roadMask?.(x, z) ?? 0;
+    if (road > 0) out.lerp(COLOR_ROAD, road * 0.88);
 
     // Камень на крутых склонах и в высокогорье.
     const rocky = Math.max(smoothstep(0.2, 0.5, slope), smoothstep(70, 118, height) * 0.85);

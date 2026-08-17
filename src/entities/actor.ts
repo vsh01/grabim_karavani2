@@ -51,6 +51,8 @@ export interface ActorOptions {
   toughness?: number;
   gold?: number;
   scale?: number;
+  /** Для торговца: какой прилавок он держит. */
+  shopSiteId?: string;
 }
 
 export interface HitResult {
@@ -103,6 +105,16 @@ export class Actor {
   readonly home = new THREE.Vector3();
   /** Радиус, в котором персонаж считает себя «у себя». */
   homeRadius = 26;
+
+  /**
+   * Точка, около которой надо держаться: сопровождение корована идёт за
+   * телегой, а не бродит по своему участку. Обновляется владельцем каждый кадр.
+   */
+  readonly escortAnchor = new THREE.Vector3();
+  hasEscortAnchor = false;
+
+  /** Торговец обслуживает этот узел — по нему берутся прилавок и цены. */
+  shopSiteId: string | null = null;
   /** Труп исчезает не сразу — сколько он уже лежит. */
   corpseAge = 0;
 
@@ -124,6 +136,7 @@ export class Actor {
       this.inventory.equippedArmor = options.armor;
     }
     this.inventory.gold = options.gold ?? 0;
+    this.shopSiteId = options.shopSiteId ?? null;
 
     const y = terrain.heightAt(options.x, options.z);
     this.physics = {

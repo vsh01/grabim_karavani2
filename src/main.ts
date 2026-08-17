@@ -76,6 +76,15 @@ async function main(): Promise<void> {
       aimAt(actorId: number, part: BodyPart): boolean {
         return game.debugAimAt(actorId, part);
       },
+      aimAtNearest(part: BodyPart, radius?: number): number | null {
+        return game.debugAimAtNearest(part, radius);
+      },
+      approachNearest(part: BodyPart, radius?: number): number | null {
+        return game.debugApproachNearest(part, radius);
+      },
+      healPlayer(): void {
+        game.debugHealPlayer();
+      },
       bandage(): void {
         game.debugBandage();
       },
@@ -93,6 +102,31 @@ async function main(): Promise<void> {
       },
       population() {
         return game.populationReport();
+      },
+      economy() {
+        return game.economyReport();
+      },
+      spawnCaravan(routeId?: string) {
+        return game.debugSpawnCaravan(routeId);
+      },
+      goToCaravan() {
+        return game.debugGoToCaravan();
+      },
+      nearestCaravan() {
+        return game.debugNearestCaravan();
+      },
+      plunder(): boolean {
+        return game.debugPlunder();
+      },
+      openTrade(siteId: string): boolean {
+        return game.debugOpenTrade(siteId);
+      },
+      closeTrade(): void {
+        game.closeTrade();
+      },
+      onRoad(): boolean {
+        const position = game.player.position;
+        return game.roads.isOnRoad(position.x, position.z);
       },
       stats() {
         const position = game.player.position;
