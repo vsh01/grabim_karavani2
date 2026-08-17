@@ -156,6 +156,21 @@ async function main(): Promise<void> {
       factions() {
         return game.factionReport();
       },
+      save(slot = 1): boolean {
+        return game.saveToSlot(slot);
+      },
+      load(slot = 1): boolean {
+        return game.loadFromSlot(slot);
+      },
+      slots() {
+        return game.saveSlots();
+      },
+      openMap(): void {
+        game.openMap();
+      },
+      closeMap(): void {
+        game.closeMap();
+      },
       onRoad(): boolean {
         const position = game.player.position;
         return game.roads.isOnRoad(position.x, position.z);

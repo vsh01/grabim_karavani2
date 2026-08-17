@@ -208,6 +208,12 @@ export class Caravan {
     }
   }
 
+  /** Поставить обоз в нужную точку маршрута — при загрузке сохранения. */
+  setProgress(distance: number, terrain: Terrain): void {
+    this.distanceAlong = Math.max(0, Math.min(this.totalLength, distance));
+    this.placeOnRoute(terrain);
+  }
+
   /** Забрать груз. Возвращает то, что досталось. */
   plunder(): { cargo: CargoEntry[]; gold: number } {
     const loot = { cargo: this.cargo.map((entry) => ({ ...entry })), gold: this.gold };

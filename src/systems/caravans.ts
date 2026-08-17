@@ -242,6 +242,52 @@ export class CaravanSystem {
     return cargo;
   }
 
+  /** Убрать все обозы: используется при загрузке сохранения. */
+  clear(): void {
+    for (const caravan of this.caravans) caravan.dispose();
+    this.caravans.length = 0;
+    this.wreckAge.clear();
+    this.routeOfCaravan.clear();
+  }
+
+  /**
+   * Восстановить обоз из снимка.
+   * Маршрут не хранится — он пересчитывается по концам, потому что дороги
+   * детерминированы и зависят только от сида мира.
+   */
+  restoreCaravan(snapshot: {
+    owner: Faction;
+    fromSite: string;
+    toSite: string;
+    cargo: { id: string; count: number }[];
+    gold: number;
+    distanceAlong: number;
+    looted: boolean;
+  }): Caravan | null {
+    const path = this.roads.routeBetween(snapshot.fromSite, snapshot.toSite);
+    if (path.length < 2) return null;
+
+    const caravan = new Caravan({
+      owner: snapshot.owner,
+      fromSite: snapshot.fromSite,
+      toSite: snapshot.toSite,
+      route: path,
+      cargo: snapshot.cargo.map((entry) => ({ ...entry })),
+      gold: snapshot.gold,
+    });
+    caravan.looted = snapshot.looted;
+    caravan.setProgress(snapshot.distanceAlong, this.terrain);
+
+    this.caravans.push(caravan);
+    this.group.add(caravan.group);
+
+    // Маршрут в списке постоянных ищем по концам: по нему считается опасность.
+    const route = ROUTES.find((entry) => entry.from === snapshot.fromSite && entry.to === snapshot.toSite);
+    if (route) this.routeOfCaravan.set(caravan.id, route);
+
+    return caravan;
+  }
+
   /** Ближайшая телега, которую можно обыскать. */
   nearestPlunderable(x: number, z: number, radius: number): Caravan | null {
     let best: Caravan | null = null;

@@ -413,6 +413,66 @@ async function main() {
 
   await villainPage.close();
 
+  // ── Сохранения и карта ────────────────────────────────────────────────────
+  // Записываем игру, портим состояние и проверяем, что загрузка его вернула.
+  const before = await page.evaluate(() => {
+    window.__game.teleport(-330, -290);
+    window.__game.save(2);
+    return { player: window.__game.player(), factions: window.__game.factions() };
+  });
+  await page.waitForTimeout(700);
+
+  await page.evaluate(() => {
+    window.__game.teleport(400, 300);
+    window.__game.give('silk', 40);
+    window.__game.hurt('rightArm', 300, 'cut');
+  });
+  await page.waitForTimeout(900);
+
+  const loaded = await page.evaluate(() => {
+    window.__game.load(2);
+    return {
+      player: window.__game.player(),
+      factions: window.__game.factions(),
+      position: window.__game.stats().position,
+    };
+  });
+  await page.waitForTimeout(900);
+
+  console.log(
+    `→ сохранение: золото ${before.player.gold} → загружено ${loaded.player.gold}, ` +
+      `раны «${loaded.player.injuries.join(', ') || 'нет'}»`,
+  );
+  if (loaded.player.gold !== before.player.gold) {
+    failures.push(`после загрузки золото ${loaded.player.gold}, а было ${before.player.gold}`);
+  }
+  if (loaded.player.injuries.some((line) => line.includes('правая рука'))) {
+    failures.push('загрузка не отменила рану, полученную после сохранения');
+  }
+  if (Math.abs(loaded.position.x - (-330)) > 12 || Math.abs(loaded.position.z - (-290)) > 12) {
+    failures.push('после загрузки игрок оказался не там, где сохранялся');
+  }
+  if (loaded.factions.order?.id !== before.factions.order?.id) {
+    failures.push('после загрузки потерялся приказ');
+  }
+
+  const slots = await page.evaluate(() => window.__game.slots());
+  console.log(`→ слоты: ${slots.map((slot) => `${slot.slot}: ${slot.label}`).join(' | ')}`);
+  if (!slots.some((slot) => slot.used)) failures.push('сохранение не попало в слот');
+
+  // Карта мира.
+  await page.evaluate(() => window.__game.openMap());
+  await page.waitForTimeout(900);
+  await page.screenshot({ path: join(outDir, 'map.png') });
+  const mapVisible = await page.evaluate(() => {
+    const screen = document.getElementById('map-screen');
+    return screen ? getComputedStyle(screen).display !== 'none' : false;
+  });
+  if (!mapVisible) failures.push('карта не открылась');
+  console.log(`→ карта ${mapVisible ? 'открыта' : 'не открылась'}`);
+  await page.evaluate(() => window.__game.closeMap());
+  await page.waitForTimeout(400);
+
   // Ночной кадр — заодно проверяем, что смена суток не роняет шейдеры.
   await page.evaluate(() => {
     window.__game.teleport(-470, 40);

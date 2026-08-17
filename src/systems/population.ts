@@ -148,11 +148,16 @@ export class Population {
     actor.dispose();
   }
 
-  dispose(): void {
+  /** Убрать всех: используется при загрузке сохранения. */
+  clear(): void {
     for (const actor of this.actors) actor.dispose();
     this.actors.length = 0;
     for (const limb of this.limbs) limb.mesh.removeFromParent();
     this.limbs.length = 0;
+  }
+
+  dispose(): void {
+    this.clear();
   }
 }
 

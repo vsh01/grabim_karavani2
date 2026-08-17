@@ -7,6 +7,7 @@ import { Sky } from './world/sky';
 import { ZONES, zoneAt } from './world/zones';
 import { RoadNetwork } from './world/roads';
 import { Player } from './entities/player';
+import { MovementMode } from './entities/movement';
 import { BodyPart, LIMBS, PART_NAMES } from './entities/body';
 import { Actor } from './entities/actor';
 import { CollisionWorld } from './systems/physics';
@@ -26,9 +27,21 @@ import { buildSettlements } from './world/settlements';
 import { QuestLog } from './systems/quests';
 import { RaidSystem } from './systems/raids';
 import { Rng } from './core/rng';
+import {
+  SAVE_VERSION,
+  describeSave,
+  listSlots,
+  readSlot,
+  writeSlot,
+  type ActorSnapshot,
+  type SaveGame,
+  type SlotInfo,
+} from './systems/save';
 import { DebugHud } from './ui/debugHud';
 import { Hud } from './ui/hud';
 import { DamageOverlay } from './ui/damageOverlay';
+import { MapScreen } from './ui/mapScreen';
+import { Audio } from './systems/audio';
 
 export type ProgressReporter = (percent: number, message: string) => Promise<void>;
 
@@ -89,6 +102,8 @@ export class Game {
   readonly overlay = new DamageOverlay();
   readonly blood = new BloodEffects();
   readonly trade = new TradeScreen();
+  readonly map = new MapScreen();
+  readonly audio = new Audio();
   readonly economy = new Economy();
   readonly quests = new QuestLog();
 
@@ -117,6 +132,8 @@ export class Game {
   /** Опорная точка, у которой игрок уже отметился, — чтобы не засчитывать дважды. */
   private lastReachedSite: string | null = null;
   private reachTimer = 0;
+  /** Сколько метров прошагано с прошлого звука шага. */
+  private stepDistance = 0;
 
   private constructor(private readonly options: GameOptions) {
     this.renderer = new THREE.WebGLRenderer({
@@ -317,14 +334,15 @@ export class Game {
       <div style="font-size:24px;letter-spacing:0.05em;color:#d9b45a">Нажмите, чтобы играть</div>
       <div style="opacity:0.8">WASD — идти · Shift — бежать · Пробел — прыжок · мышь — смотреть</div>
       <div style="opacity:0.8">ЛКМ — удар · R — перевязать · E — обыскать и торговать · Tab — мешок</div>
-      <div style="opacity:0.5;font-size:13px">Esc — освободить курсор · F3 — служебная панель</div>
+      <div style="opacity:0.8">M — карта и сохранения · Q — приказ · F H G — команды отряду</div>
+      <div style="opacity:0.5;font-size:13px">F5 — быстрое сохранение · F9 — загрузка · Esc — курсор · F3 — панель</div>
     `;
     overlay.addEventListener('click', () => this.input.requestPointerLock());
     document.body.appendChild(overlay);
 
     this.input.onPointerLockChange((locked) => {
       // Пока открыт прилавок, заставка «нажмите, чтобы играть» только мешает.
-      overlay.style.display = locked || this.trade.isOpen ? 'none' : 'flex';
+      overlay.style.display = locked || this.trade.isOpen || this.map.isOpen ? 'none' : 'flex';
       this.input.enabled = locked;
     });
 
@@ -402,6 +420,7 @@ export class Game {
     this.combat.update(dt, this.targets);
     this.blood.update(dt, (x, z) => this.terrain.heightAt(x, z));
 
+    this.playFootsteps(dt);
     this.sky.follow(this.player.camera);
     this.forest.update(this.player.position);
 
@@ -412,11 +431,34 @@ export class Game {
     this.updateInterface(dt);
   }
 
+  /**
+   * Шаги. Звук привязан к пройденному пути, а не ко времени: тогда он совпадает
+   * с шагом и не тарахтит, когда игрок стоит на месте или ползёт.
+   */
+  private playFootsteps(dt: number): void {
+    if (!this.player.wounds.alive || !this.player.body.grounded) return;
+
+    const velocity = this.player.body.velocity;
+    const speed = Math.hypot(velocity.x, velocity.z);
+    if (speed < 0.4) return;
+
+    this.stepDistance += speed * dt;
+    const stride = this.player.mode === MovementMode.Crawl ? 1.1 : this.player.sprinting ? 2.6 : 2.0;
+    if (this.stepDistance >= stride) {
+      this.stepDistance = 0;
+      this.audio.play('step');
+    }
+  }
+
   /** Обработка того, что игрок нажал: удар, перевязка, обыск, смена оружия. */
   private handlePlayerActions(): void {
-    // Пока открыт мешок или прилавок, мир ждёт: бить и ходить нельзя.
+    // Пока открыт мешок, прилавок или карта, мир ждёт: бить и ходить нельзя.
     if (this.trade.isOpen) {
       if (this.input.justPressedRaw('Escape') || this.input.justPressedRaw('Tab')) this.closeTrade();
+      return;
+    }
+    if (this.map.isOpen) {
+      if (this.input.justPressedRaw('Escape') || this.input.justPressedRaw('KeyM')) this.closeMap();
       return;
     }
 
@@ -427,6 +469,9 @@ export class Game {
 
     if (this.input.justPressed('Tab')) this.openBag();
     if (this.input.justPressed('KeyQ')) this.handleOrderKey();
+    if (this.input.justPressed('KeyM')) this.openMap();
+    if (this.input.justPressedRaw('F5')) this.saveToSlot(1);
+    if (this.input.justPressedRaw('F9')) this.loadFromSlot(1);
     if (this.input.justPressed('KeyF')) this.setSquadOrder('follow');
     if (this.input.justPressed('KeyH')) this.setSquadOrder('hold');
     if (this.input.justPressed('KeyG')) this.setSquadOrder('attack');
@@ -447,7 +492,8 @@ export class Game {
         this.hud.log('Одной рукой лук не натянуть', 'bad');
         return;
       }
-      if (!this.combat.playerShoot(this.player)) this.hud.log('Стрелы кончились', 'bad');
+      if (this.combat.playerShoot(this.player)) this.audio.play('bow');
+      else this.hud.log('Стрелы кончились', 'bad');
       return;
     }
 
@@ -542,6 +588,7 @@ export class Game {
       this.hud.log('Приказов нет', 'plain');
       return;
     }
+    this.audio.play('order');
     this.hud.log(`Приказ: ${order.title}`, 'good');
     this.hud.log(`«${order.brief}»`, 'plain');
   }
@@ -553,6 +600,7 @@ export class Game {
 
     this.player.inventory.gold += order.gold;
     for (const [faction, delta] of order.reputation) this.reputation.change(faction, delta);
+    this.audio.play('coin');
 
     this.hud.log(
       order.gold > 0 ? `Приказ выполнен: ${order.title}. Награда ${order.gold} золота.` : `Приказ выполнен: ${order.title}.`,
@@ -705,6 +753,7 @@ export class Game {
 
     this.player.inventory.gold += loot.gold;
     for (const entry of loot.cargo) this.player.inventory.add(entry.id, entry.count);
+    this.audio.play('coin');
 
     this.economy.registerLostCargo(caravan.toSite, loot.cargo);
     this.caravans.registerRobbery(caravan);
@@ -743,6 +792,7 @@ export class Game {
   private handleCombatEvent = (event: CombatEvent): void => {
     if (event.victimIsPlayer) {
       this.overlay.hit(0.12 + event.damage * 0.006);
+      this.audio.play(event.severed ? 'sever' : event.killed ? 'death' : 'hurt');
       if (event.severed) {
         this.hud.log(`${event.attackerName}: ${event.message}`, 'alarm');
         this.hud.log('Перевяжитесь, иначе истечёте кровью — R', 'alarm');
@@ -757,6 +807,7 @@ export class Game {
     const victim = event.victim;
     if (!victim) return;
 
+    if (event.damage > 0) this.audio.play(event.severed ? 'sever' : 'hit');
     if (event.severed && LIMBS.includes(event.part)) {
       this.population.dropLimb(victim, event.part, event.position.x, event.position.y, event.position.z);
     }
@@ -928,6 +979,40 @@ export class Game {
 
   closeTrade(): void {
     this.trade.close();
+    this.player.syncWithWounds();
+    this.lockOverlay.style.display = 'flex';
+  }
+
+  /** Карта мира и сохранения. */
+  openMap(): void {
+    this.player.controlEnabled = false;
+    this.map.open({
+      terrain: this.terrain,
+      roads: this.roads,
+      player: { x: this.player.position.x, z: this.player.position.z, yaw: this.player.yaw },
+      markers: this.caravans.caravans.map((caravan) => ({
+        x: caravan.position.x,
+        z: caravan.position.z,
+        owner: caravan.owner,
+        label: caravan.describeCargo(),
+      })),
+      slots: this.saveSlots(),
+      onSave: (slot) => {
+        this.saveToSlot(slot);
+        this.audio.play('coin');
+      },
+      onLoad: (slot) => {
+        if (this.loadFromSlot(slot)) this.closeMap();
+      },
+      onClose: () => this.closeMap(),
+    });
+
+    this.input.exitPointerLock();
+    this.lockOverlay.style.display = 'none';
+  }
+
+  closeMap(): void {
+    this.map.close();
     this.player.syncWithWounds();
     this.lockOverlay.style.display = 'flex';
   }
@@ -1301,6 +1386,144 @@ export class Game {
     return this.raids.report();
   }
 
+  // ── Сохранение и загрузка ─────────────────────────────────────────────────
+
+  /**
+   * Снять состояние мира.
+   *
+   * Ландшафт, лес и постройки в снимок не идут: они восстанавливаются из сида.
+   * Сохраняется только то, что изменилось за игру.
+   */
+  createSave(): SaveGame {
+    const position = this.player.position;
+    const actors = this.population.actors;
+    const indexOf = new Map(actors.map((actor, index) => [actor, index]));
+
+    return {
+      version: SAVE_VERSION,
+      seed: this.options.seed,
+      savedAt: new Date().toISOString(),
+      label: describeSave(
+        FACTIONS[this.player.faction].name,
+        ZONES[zoneAt(position.x, position.z)].name,
+        this.player.inventory.gold,
+      ),
+      timeOfDay: this.sky.time,
+      player: {
+        faction: this.player.faction,
+        name: this.player.characterName,
+        x: position.x,
+        y: position.y,
+        z: position.z,
+        yaw: this.player.yaw,
+        pitch: this.player.pitch,
+        wounds: this.player.wounds.serialize(),
+        inventory: this.player.inventory.serialize(),
+      },
+      reputation: this.reputation.serialize(),
+      quests: this.quests.serialize(),
+      economy: this.economy.serialize(),
+      actors: actors.map((actor) => actor.serialize()),
+      caravans: this.caravans.caravans.map((caravan) => ({
+        owner: caravan.owner,
+        fromSite: caravan.fromSite,
+        toSite: caravan.toSite,
+        cargo: caravan.cargo.map((entry) => ({ ...entry })),
+        gold: caravan.gold,
+        distanceAlong: caravan.distanceAlong,
+        looted: caravan.looted,
+        members: caravan.members
+          .map((member) => indexOf.get(member) ?? -1)
+          .filter((index) => index >= 0),
+      })),
+    };
+  }
+
+  /** Восстановить мир из снимка. Сид должен совпадать — иначе это другой мир. */
+  applySave(save: SaveGame): boolean {
+    if (save.seed !== this.options.seed) {
+      this.hud.log('Это сохранение из другого мира', 'bad');
+      return false;
+    }
+
+    this.sky.time = save.timeOfDay;
+    this.sky.update(0);
+
+    // Игрок.
+    this.player.faction = save.player.faction;
+    this.player.characterName = save.player.name;
+    this.player.position.set(save.player.x, save.player.y, save.player.z);
+    this.player.body.velocity.set(0, 0, 0);
+    this.player.yaw = save.player.yaw;
+    this.player.pitch = save.player.pitch;
+    this.player.wounds.restore(save.player.wounds);
+    this.player.inventory.restore(save.player.inventory);
+    this.player.syncWithWounds();
+
+    this.reputation.restore(save.reputation);
+    this.quests.restore(save.quests);
+    this.economy.restore(save.economy);
+
+    // Население: старое убираем целиком, новое поднимаем из снимка.
+    this.squad.length = 0;
+    this.population.clear();
+    const restored: Actor[] = save.actors.map((snapshot) => this.restoreActor(snapshot));
+    for (const actor of restored) {
+      if (actor.inPlayerSquad && actor.alive) this.squad.push(actor);
+    }
+
+    // Обозы и их сопровождение.
+    this.caravans.clear();
+    for (const snapshot of save.caravans) {
+      const caravan = this.caravans.restoreCaravan(snapshot);
+      if (!caravan) continue;
+      for (const index of snapshot.members) {
+        const member = restored[index];
+        if (member) caravan.addMember(member);
+      }
+    }
+
+    this.forest.update(this.player.position, true);
+    this.hud.log('Игра загружена', 'good');
+    return true;
+  }
+
+  private restoreActor(snapshot: ActorSnapshot): Actor {
+    const actor = this.population.spawn({
+      faction: snapshot.faction,
+      x: snapshot.x,
+      z: snapshot.z,
+      role: snapshot.role,
+      name: snapshot.name,
+      shopSiteId: snapshot.shopSiteId ?? undefined,
+      commandsFaction: snapshot.commandsFaction ?? undefined,
+    });
+    actor.restore(snapshot);
+    return actor;
+  }
+
+  /** Записать игру в слот. */
+  saveToSlot(slot: number): boolean {
+    const ok = writeSlot(slot, this.createSave());
+    this.hud.log(ok ? `Игра сохранена в слот ${slot}` : 'Сохранить не удалось', ok ? 'good' : 'bad');
+    return ok;
+  }
+
+  /** Загрузить игру из слота. */
+  loadFromSlot(slot: number): boolean {
+    const save = readSlot(slot);
+    if (!save) {
+      this.hud.log(`Слот ${slot} пуст`, 'bad');
+      return false;
+    }
+    return this.applySave(save);
+  }
+
+  /** Что лежит в слотах. */
+  saveSlots(): SlotInfo[] {
+    return listSlots();
+  }
+
   /** Сводка по фракциям, приказам и отряду. */
   factionReport(): Record<string, unknown> {
     return {
@@ -1383,6 +1606,9 @@ export class Game {
     this.blood.dispose();
     this.sky.dispose();
     this.hud.dispose();
+    this.map.dispose();
+    this.trade.dispose();
+    this.audio.dispose();
     this.overlay.dispose();
     this.renderer.dispose();
     this.lockOverlay.remove();

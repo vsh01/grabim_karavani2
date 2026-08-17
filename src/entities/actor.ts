@@ -15,6 +15,7 @@ import { type CharacterBody, type CollisionWorld, moveCharacter } from '../syste
 import type { Terrain } from '../world/terrain';
 import type { Forest } from '../world/forest';
 import { clamp01, damp, angleDelta } from '../core/math';
+import type { ActorSnapshot } from '../systems/save';
 
 /** Чем этот персонаж занят в мире. */
 export type ActorRole =
@@ -269,10 +270,10 @@ export class Actor {
   }
 
   /** Убрать с модели то, что отрубили, и вернуть то, что заменили протезом. */
-  private syncSeveredParts(): void {
+  private syncSeveredParts(force = false): void {
     // Проверяем не каждый кадр: состояние меняется редко.
     this.lastSeveredSync -= 1;
-    if (this.lastSeveredSync > 0) return;
+    if (!force && this.lastSeveredSync > 0) return;
     this.lastSeveredSync = 12;
 
     for (const part of [BodyPart.LeftArm, BodyPart.RightArm, ...LEGS]) {
@@ -325,6 +326,52 @@ export class Actor {
 
     const hit = raycastColliders(this.colliderWorld, this.wounds, origin, direction, maxDistance);
     return hit ? { actor: this, part: hit.part, distance: hit.distance, point: hit.point } : null;
+  }
+
+  /**
+   * Снимок для сохранения.
+   * Хранится только изменяемое: модель и геометрия восстановятся сами.
+   */
+  serialize(): ActorSnapshot {
+    return {
+      faction: this.faction,
+      role: this.role,
+      name: this.name,
+      x: this.position.x,
+      y: this.position.y,
+      z: this.position.z,
+      yaw: this.yaw,
+      homeX: this.home.x,
+      homeZ: this.home.z,
+      homeRadius: this.homeRadius,
+      wounds: this.wounds.serialize(),
+      inventory: this.inventory.serialize(),
+      shopSiteId: this.shopSiteId,
+      commandsFaction: this.commandsFaction,
+      inPlayerSquad: this.inPlayerSquad,
+      corpseAge: this.corpseAge,
+    };
+  }
+
+  /** Восстановить состояние из снимка. Персонаж уже создан с нужной стороной. */
+  restore(snapshot: ActorSnapshot): void {
+    this.position.set(snapshot.x, snapshot.y, snapshot.z);
+    this.physics.velocity.set(0, 0, 0);
+    this.yaw = snapshot.yaw;
+    this.home.set(snapshot.homeX, 0, snapshot.homeZ);
+    this.homeRadius = snapshot.homeRadius;
+    this.wounds.restore(snapshot.wounds);
+    this.inventory.restore(snapshot.inventory);
+    this.shopSiteId = snapshot.shopSiteId;
+    this.commandsFaction = snapshot.commandsFaction;
+    this.inPlayerSquad = snapshot.inPlayerSquad;
+    this.corpseAge = snapshot.corpseAge;
+
+    this.model.setWeaponVisible(this.weapon.id !== 'fists');
+    // Мёртвого сразу кладём: анимация падения при загрузке выглядела бы дико.
+    if (!this.alive) this.model.collapse();
+    this.syncSeveredParts(true);
+    this.syncModel();
   }
 
   /** Что осталось при трупе — это и будет добычей. */
