@@ -1,0 +1,75 @@
+name: Публикация на GitHub Pages
+
+on:
+  push:
+    # Ветка по умолчанию сейчас одна; `main` указан на случай переименования,
+    # чтобы публикация не отвалилась молча.
+    branches:
+      - claude/3d-action-game-factions-8zzesy
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Публикацию на полпути не отменяем: пусть доедет до конца.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Собрать игру
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Vite 8 требует Node 20 и новее.
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # Проверки идут до сборки намеренно: незачем публиковать заведомо
+      # сломанное. Прогон в браузере (tools/smoke.mjs) сюда не берём — ему нужен
+      # отдельно скачанный Chromium, и публикация из-за него станет втрое дольше.
+      - name: Проверка типов
+        run: npm run typecheck
+
+      - name: Юнит-тесты
+        run: npm test
+
+      - name: Сборка
+        run: npm run build
+
+      # Страховка от того, что файлы начнут обрабатывать как Jekyll.
+      - name: Отключить Jekyll
+        run: touch dist/.nojekyll
+
+      # Стоит после сборки специально: если Pages не включены, в журнале будет
+      # видно, что игра собралась и прошла проверки, а споткнулась только
+      # публикация. Диагностика получается однозначной.
+      - name: Настроить Pages
+        uses: actions/configure-pages@v5
+        with:
+          # Пытаемся включить Pages сами, чтобы не требовать ручных действий.
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Выложить
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
