@@ -115,6 +115,11 @@ export class Hud {
     }
   }
 
+  /** Что сейчас висит в журнале. Нужно автотестам, чтобы видеть ответ игры. */
+  recentMessages(): string[] {
+    return this.entries.map((entry) => entry.element.textContent ?? '');
+  }
+
   update(dt: number, state: HudState): void {
     this.updateDiagram(state.wounds);
     this.updateBars(state.wounds);

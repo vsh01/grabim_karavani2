@@ -135,8 +135,11 @@ async function main(): Promise<void> {
       nearestCaravan() {
         return game.debugNearestCaravan();
       },
-      plunder(): boolean {
-        return game.debugPlunder();
+      hint(): string | null {
+        return game.debugInteractionHint();
+      },
+      messages(): string[] {
+        return game.debugMessages();
       },
       openTrade(siteId: string): boolean {
         return game.debugOpenTrade(siteId);

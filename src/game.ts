@@ -65,8 +65,14 @@ const SPAWNS: Record<Faction, { x: number; z: number }> = {
 
 /** На каком расстоянии можно обыскать труп или заговорить. */
 const INTERACT_RANGE = 2.6;
-/** Телега большая — до неё дотягиваемся дальше. */
-const CARAVAN_RANGE = 4.5;
+/**
+ * Телега большая — до неё дотягиваемся дальше.
+ * Обоз с оглоблями и лошадью тянется метров на пять вперёд от середины кузова,
+ * поэтому радиус меньше этого означал бы «подошёл вплотную и всё равно далеко».
+ */
+const CARAVAN_RANGE = 7;
+/** С какого расстояния игрок замечает обоз на тракте. */
+const CARAVAN_NOTICE_RANGE = 55;
 /** Сколько берёт лекарь за полное лечение. */
 const HEAL_COST = 45;
 
@@ -134,6 +140,8 @@ export class Game {
   private reachTimer = 0;
   /** Сколько метров прошагано с прошлого звука шага. */
   private stepDistance = 0;
+  /** Обозы, о которых игроку уже сообщили. */
+  private readonly noticedCaravans = new Set<number>();
 
   private constructor(private readonly options: GameOptions) {
     this.renderer = new THREE.WebGLRenderer({
@@ -417,6 +425,7 @@ export class Game {
     this.economy.update(dt);
     this.updateSquad(dt);
     this.updateReachedSites(dt);
+    this.noticeCaravans();
     this.combat.update(dt, this.targets);
     this.blood.update(dt, (x, z) => this.terrain.heightAt(x, z));
 
@@ -527,7 +536,18 @@ export class Game {
       return;
     }
     if (target.kind === 'caravan') {
-      this.plunderCaravan(target.caravan);
+      const caravan = target.caravan;
+      const guards = caravan.defenderCount;
+
+      if (guards > 0) {
+        this.hud.log(`Телегу стерегут: ${guards}. Сначала сопровождение.`, 'bad');
+        return;
+      }
+      if (!caravan.isPlunderable) {
+        this.hud.log('Здесь уже всё забрали', 'plain');
+        return;
+      }
+      this.plunderCaravan(caravan);
       return;
     }
     if (target.kind === 'commander') {
@@ -681,6 +701,32 @@ export class Game {
         this.player.position.z + Math.sin(angle) * 3.4,
       );
       member.hasEscortAnchor = true;
+    }
+  }
+
+  /**
+   * Заметить обоз на тракте.
+   *
+   * Корованов в мире всего три, и ходят они далеко от опушки эльфов — легко
+   * доиграть до конца и ни одного не встретить. Одна строчка в журнале при
+   * сближении решает это, не превращаясь в назойливую подсказку: про каждый
+   * обоз сообщается ровно один раз.
+   */
+  private noticeCaravans(): void {
+    const { x, z } = this.player.position;
+
+    for (const caravan of this.caravans.caravans) {
+      if (this.noticedCaravans.has(caravan.id)) continue;
+      if (distance2D(x, z, caravan.position.x, caravan.position.z) > CARAVAN_NOTICE_RANGE) continue;
+
+      this.noticedCaravans.add(caravan.id);
+      const guards = caravan.defenderCount;
+      this.hud.log(
+        guards > 0
+          ? `На тракте корован, охраны ${guards} — глядите в оба`
+          : 'На тракте брошенный корован',
+        'plain',
+      );
     }
   }
 
@@ -911,7 +957,10 @@ export class Game {
       }
     }
 
-    const caravan = this.caravans.nearestPlunderable(x, z, CARAVAN_RANGE);
+    // Берём любой обоз, а не только беззащитный: игрок должен видеть, что перед
+    // ним корован, даже когда его ещё стерегут. Иначе E молчит и кажется, что
+    // грабить корованы нельзя вовсе.
+    const caravan = this.caravans.nearest(x, z, CARAVAN_RANGE);
     if (caravan) {
       this.interaction = { kind: 'caravan', caravan };
       return;
@@ -926,7 +975,7 @@ export class Game {
     if (!target) return null;
 
     if (target.kind === 'corpse') return `E — обыскать (${target.actor.name})`;
-    if (target.kind === 'caravan') return `E — ограбить корован (${target.caravan.describeCargo()})`;
+    if (target.kind === 'caravan') return this.caravanHint(target.caravan);
     if (target.kind === 'recruit') return `E — нанять за ${RECRUIT_COST} зол. (${target.actor.name})`;
     if (target.kind === 'commander') {
       if (this.quests.active?.done) return `E — доложить о выполнении (${target.actor.name})`;
@@ -934,6 +983,14 @@ export class Game {
     }
     if (!this.reputation.willTrade(target.market.owner)) return `${target.market.name}: с вами не торгуют`;
     return `E — торговать (${target.market.name})`;
+  }
+
+  /** Что написать про обоз, у которого стоит игрок. */
+  private caravanHint(caravan: Caravan): string {
+    const guards = caravan.defenderCount;
+    if (guards > 0) return `Корован (охрана: ${guards}) — сначала сопровождение`;
+    if (caravan.isPlunderable) return `E — ограбить корован (${caravan.describeCargo()})`;
+    return 'Корован уже пуст';
   }
 
   // ── Торговля ───────────────────────────────────────────────────────────────
@@ -1324,7 +1381,9 @@ export class Game {
     const caravan = this.caravans.nearest(this.player.position.x, this.player.position.z);
     if (!caravan) return null;
 
-    this.player.teleport(caravan.position.x + 6, caravan.position.z + 6, this.terrain);
+    // Встаём вплотную к телеге, а не «где-то рядом»: помощник должен приводить
+    // ровно туда, откуда игрок дотянулся бы до обоза.
+    this.player.teleport(caravan.position.x + 3, caravan.position.z + 3, this.terrain);
     this.debugLookAtCaravan(caravan);
     this.forest.update(this.player.position, true);
     return this.describeCaravan(caravan);
@@ -1343,16 +1402,21 @@ export class Game {
     return caravan ? this.describeCaravan(caravan) : null;
   }
 
-  /** Обыскать ближайшую телегу, до которой дотягиваемся. */
-  debugPlunder(): boolean {
-    const caravan = this.caravans.nearestPlunderable(
-      this.player.position.x,
-      this.player.position.z,
-      CARAVAN_RANGE + 6,
-    );
-    if (!caravan) return false;
-    this.plunderCaravan(caravan);
-    return true;
+  /**
+   * Подсказка, которую игрок сейчас видит на экране.
+   *
+   * Автотест обязан ходить тем же путём, что и человек: раньше он грабил обоз
+   * в обход `findInteractionTarget`, с расширенным радиусом, — и поэтому не
+   * замечал, что настоящее нажатие E не работает.
+   */
+  debugInteractionHint(): string | null {
+    this.findInteractionTarget();
+    return this.interactionHint();
+  }
+
+  /** Последние строки журнала — по ним видно, ответила ли игра на действие. */
+  debugMessages(): string[] {
+    return this.hud.recentMessages();
   }
 
   /** Открыть прилавок указанного узла, где бы игрок ни стоял. */

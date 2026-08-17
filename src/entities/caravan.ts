@@ -5,7 +5,7 @@ import { Faction } from '../data/factions';
 import { tryItem } from '../data/items';
 import type { RoadPoint } from '../world/roads';
 import type { Terrain } from '../world/terrain';
-import type { Actor } from './actor';
+import { AiState, type Actor } from './actor';
 
 /** Одна позиция в накладной корована. */
 export interface CargoEntry {
@@ -34,7 +34,33 @@ const CARAVAN_SPEED = 2.1;
  * Тот, кто удрал в лес, телегу уже не защищает: иначе один сбежавший погонщик
  * навсегда делал бы обоз неприкосновенным.
  */
-const DEFENDER_RANGE = 25;
+export const DEFENDER_RANGE = 25;
+
+/** То, что нужно знать о сопровождающем, чтобы решить, стережёт ли он телегу. */
+export interface DefenderState {
+  alive: boolean;
+  /** Есть ли чем драться: без рук человек телегу не удержит. */
+  canFight: boolean;
+  /** Что он сейчас делает — удирающий охраной не считается. */
+  state: AiState;
+  x: number;
+  z: number;
+}
+
+/**
+ * Стережёт ли этот человек телегу прямо сейчас.
+ *
+ * Раньше здесь стояла проверка «жив и в двадцати пяти метрах», и из-за неё
+ * грабёж срывался самым обидным образом: один удравший за дерево стражник или
+ * безрукий погонщик навсегда запирали обоз, а игрок, перебивший всех, кого
+ * видел, не понимал, почему телега неприкосновенна. Защитник — тот, кто может
+ * и намерен защищать.
+ */
+export function countsAsDefender(member: DefenderState, wagonX: number, wagonZ: number): boolean {
+  if (!member.alive || !member.canFight) return false;
+  if (member.state === AiState.Flee) return false;
+  return distance2D(member.x, member.z, wagonX, wagonZ) < DEFENDER_RANGE;
+}
 
 /**
  * Корован: повозка с грузом, погонщик и охрана, идущие по тракту из одного
@@ -94,13 +120,32 @@ export class Caravan {
     return this.group.position;
   }
 
-  /** Осталось ли кому защищать телегу: живые и не разбежавшиеся. */
+  /** Осталось ли кому защищать телегу. */
   get hasDefenders(): boolean {
-    return this.members.some(
-      (member) =>
-        member.alive &&
-        distance2D(member.position.x, member.position.z, this.position.x, this.position.z) < DEFENDER_RANGE,
-    );
+    return this.defenderCount > 0;
+  }
+
+  /** Сколько человек реально стережёт телегу — это число видит игрок в подсказке. */
+  get defenderCount(): number {
+    let count = 0;
+    for (const member of this.members) {
+      if (
+        countsAsDefender(
+          {
+            alive: member.alive,
+            canFight: member.wounds.canFight,
+            state: member.state,
+            x: member.position.x,
+            z: member.position.z,
+          },
+          this.position.x,
+          this.position.z,
+        )
+      ) {
+        count++;
+      }
+    }
+    return count;
   }
 
   /** Сколько сопровождающих ещё живы, где бы они ни были. */

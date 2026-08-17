@@ -7,6 +7,8 @@ import { RoadNetwork, TRADE_HUBS } from '../src/world/roads';
 import { Terrain } from '../src/world/terrain';
 import { getSite } from '../src/world/sites';
 import { distance2D } from '../src/core/math';
+import { DEFENDER_RANGE, countsAsDefender } from '../src/entities/caravan';
+import { AiState } from '../src/entities/actor';
 
 describe('прилавки', () => {
   it('все товары на прилавках существуют', () => {
@@ -223,5 +225,44 @@ describe('дороги', () => {
       expect(marketAt(market.siteId)).toBeDefined();
       expect(roads.connectedSites).toContain(market.siteId);
     }
+  });
+});
+
+describe('кто стережёт корован', () => {
+  /** Здоровый боец, стоящий вплотную к телеге. */
+  function guard(overrides: Partial<Parameters<typeof countsAsDefender>[0]> = {}) {
+    return { alive: true, canFight: true, state: AiState.Attack, x: 2, z: 0, ...overrides };
+  }
+
+  it('живой боец рядом с телегой её стережёт', () => {
+    expect(countsAsDefender(guard(), 0, 0)).toBe(true);
+  });
+
+  it('убитый уже никого не стережёт', () => {
+    expect(countsAsDefender(guard({ alive: false }), 0, 0)).toBe(false);
+  });
+
+  it('удирающий охраной не считается', () => {
+    // Иначе один стражник, сбежавший от боли за дерево, навсегда запирал бы обоз.
+    expect(countsAsDefender(guard({ state: AiState.Flee }), 0, 0)).toBe(false);
+  });
+
+  it('безрукий телегу не удержит', () => {
+    expect(countsAsDefender(guard({ canFight: false }), 0, 0)).toBe(false);
+  });
+
+  it('ушедший далеко перестаёт быть охраной', () => {
+    expect(countsAsDefender(guard({ x: DEFENDER_RANGE - 1 }), 0, 0)).toBe(true);
+    expect(countsAsDefender(guard({ x: DEFENDER_RANGE + 1 }), 0, 0)).toBe(false);
+  });
+
+  it('разбежавшееся сопровождение открывает телегу целиком', () => {
+    const escort = [
+      guard({ alive: false }),
+      guard({ state: AiState.Flee, x: 6 }),
+      guard({ canFight: false, x: 3 }),
+      guard({ x: DEFENDER_RANGE + 12 }),
+    ];
+    expect(escort.some((member) => countsAsDefender(member, 0, 0))).toBe(false);
   });
 });

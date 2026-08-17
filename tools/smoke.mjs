@@ -280,6 +280,31 @@ async function main() {
 
   const goldBefore = await page.evaluate(() => window.__game.player().gold);
 
+  // Прямая проверка жалобы «грабить корованы нельзя»: подходим к охраняемому
+  // обозу и смотрим, отвечает ли игра хоть что-нибудь. Подходим заново — телега
+  // на ходу и за время предыдущих проверок успела отъехать.
+  const guardedHint = await page.evaluate(() => {
+    window.__game.goToCaravan();
+    return window.__game.hint();
+  });
+  console.log(`→ подсказка у охраняемого обоза: ${guardedHint ? `«${guardedHint}»` : 'нет'}`);
+  if (!guardedHint) {
+    failures.push('у охраняемого обоза нет подсказки — игрок не понимает, что перед ним корован');
+  } else if (!guardedHint.includes('охрана')) {
+    failures.push(`подсказка «${guardedHint}» не говорит, что телегу стерегут`);
+  }
+
+  const guardedReply = await page.evaluate(() => {
+    window.__game.goToCaravan();
+    window.__game.loot();
+    return window.__game.messages();
+  });
+  console.log(`→ ответ на E у охраняемого обоза: ${guardedReply.at(-1) ?? 'тишина'}`);
+  if (!guardedReply.some((line) => line.includes('стерег'))) {
+    failures.push('E у охраняемого обоза не даёт никакого ответа');
+  }
+  await page.screenshot({ path: join(outDir, 'caravan-guarded.png') });
+
   // Засада: подходим вплотную, рубим сопровождение, подлечиваясь между заходами.
   for (let i = 0; i < 70; i++) {
     const done = await page.evaluate(() => {
@@ -304,11 +329,25 @@ async function main() {
       `живых сопровождающих ${afterFight.guards}`,
   );
 
-  const plundered = await page.evaluate(() => window.__game.plunder());
+  // Грабим ровно так же, как человек: подсказка плюс E. Никаких обходных путей —
+  // именно из-за них прошлая проверка не заметила, что E не работает.
+  const readyHint = await page.evaluate(() => {
+    window.__game.goToCaravan();
+    return window.__game.hint();
+  });
+  console.log(`→ подсказка после разгрома охраны: ${readyHint ? `«${readyHint}»` : 'нет'}`);
+  if (!readyHint || !readyHint.startsWith('E —')) {
+    failures.push(`после разгрома охраны подсказка не зовёт грабить: «${readyHint ?? 'нет'}»`);
+  }
+
+  await page.evaluate(() => window.__game.loot());
   await page.waitForTimeout(500);
   await page.screenshot({ path: join(outDir, 'caravan-plundered.png') });
 
-  if (!plundered) failures.push('телегу не удалось обыскать после разгрома охраны');
+  const emptyHint = await page.evaluate(() => window.__game.hint());
+  if (emptyHint && emptyHint.startsWith('E —')) {
+    failures.push('обчищенный обоз всё ещё предлагает себя ограбить');
+  }
 
   const afterRobbery = await page.evaluate(() => window.__game.economy());
   const goldAfter = afterRobbery.gold;
