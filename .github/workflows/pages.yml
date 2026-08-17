@@ -54,10 +54,26 @@ jobs:
       # видно, что игра собралась и прошла проверки, а споткнулась только
       # публикация. Диагностика получается однозначной.
       - name: Настроить Pages
+        id: pages
         uses: actions/configure-pages@v5
         with:
           # Пытаемся включить Pages сами, чтобы не требовать ручных действий.
+          # Если политика репозитория этого не разрешает, шаг падает с
+          # «Resource not accessible by integration» — тогда нужен ручной шаг,
+          # он расписан ниже.
           enablement: true
+
+      # Понятное объяснение прямо в журнале: красный крестик во вкладке Actions
+      # не должен требовать раскопок в документации GitHub.
+      - name: Что делать, если Pages не включились
+        if: failure() && steps.pages.outcome == 'failure'
+        run: |
+          echo "::error title=Нужно включить GitHub Pages::Игра собралась и прошла все проверки — не хватает только одной настройки репозитория."
+          echo ""
+          echo "Откройте: Settings → Pages → Build and deployment → Source: GitHub Actions"
+          echo "Затем нажмите «Re-run all jobs» в этом прогоне. Пересобирать ничего не нужно."
+          echo ""
+          echo "Включить Pages из самого процесса нельзя: токену GITHUB_TOKEN это запрещено политикой."
 
       - uses: actions/upload-pages-artifact@v3
         with:
