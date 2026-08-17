@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { Input } from './core/input';
-import { clamp } from './core/math';
+import { clamp, distance2D } from './core/math';
 import { Terrain } from './world/terrain';
 import { Forest } from './world/forest';
 import { Sky } from './world/sky';
@@ -21,7 +21,11 @@ import { Reputation } from './systems/reputation';
 import { TradeScreen } from './ui/tradeScreen';
 import { tryItem, type ItemDef } from './data/items';
 import { Faction, FACTIONS } from './data/factions';
-import { getSite } from './world/sites';
+import { SITES, getSite } from './world/sites';
+import { buildSettlements } from './world/settlements';
+import { QuestLog } from './systems/quests';
+import { RaidSystem } from './systems/raids';
+import { Rng } from './core/rng';
 import { DebugHud } from './ui/debugHud';
 import { Hud } from './ui/hud';
 import { DamageOverlay } from './ui/damageOverlay';
@@ -32,10 +36,19 @@ export interface GameOptions {
   seed: number;
   container: HTMLElement;
   progress: ProgressReporter;
+  /** За кого играем. По умолчанию — за лесных эльфов. */
+  faction?: Faction;
+  /** Имя персонажа; для злодея его придумывает игрок. */
+  characterName?: string;
 }
 
-/** Точка, с которой начинается игра, — опушка леса эльфов. */
-const SPAWN = { x: -470, z: 40 };
+/** Откуда начинает каждая из сторон. */
+const SPAWNS: Record<Faction, { x: number; z: number }> = {
+  [Faction.Elves]: { x: -470, z: 40 },
+  [Faction.Palace]: { x: 430, z: -20 },
+  [Faction.Villain]: { x: 90, z: -700 },
+  [Faction.Neutral]: { x: 40, z: 520 },
+};
 
 /** На каком расстоянии можно обыскать труп или заговорить. */
 const INTERACT_RANGE = 2.6;
@@ -49,7 +62,17 @@ type Interaction =
   | null
   | { kind: 'corpse'; actor: Actor }
   | { kind: 'caravan'; caravan: Caravan }
-  | { kind: 'trade'; actor: Actor; market: Market };
+  | { kind: 'trade'; actor: Actor; market: Market }
+  | { kind: 'commander'; actor: Actor }
+  | { kind: 'recruit'; actor: Actor };
+
+/** Приказ отряду злодея. */
+type SquadOrder = 'follow' | 'hold' | 'attack';
+
+/** Сколько стоит нанять одного бойца. */
+const RECRUIT_COST = 60;
+/** На каком расстоянии игрок считается «дошедшим» до опорной точки. */
+const REACH_RADIUS = 30;
 
 /**
  * Игра целиком: сцена, мир, игрок, бой и главный цикл.
@@ -67,6 +90,7 @@ export class Game {
   readonly blood = new BloodEffects();
   readonly trade = new TradeScreen();
   readonly economy = new Economy();
+  readonly quests = new QuestLog();
 
   terrain!: Terrain;
   forest!: Forest;
@@ -75,6 +99,7 @@ export class Game {
   population!: Population;
   combat!: CombatSystem;
   caravans!: CaravanSystem;
+  raids!: RaidSystem;
   reputation!: Reputation;
 
   private running = false;
@@ -86,6 +111,12 @@ export class Game {
   private targets!: CombatTargets;
   private aiWorld!: AiWorld;
   private interaction: Interaction = null;
+  private readonly squad: Actor[] = [];
+  private squadOrder: SquadOrder = 'follow';
+  private readonly questRng = new Rng(0x51de);
+  /** Опорная точка, у которой игрок уже отметился, — чтобы не засчитывать дважды. */
+  private lastReachedSite: string | null = null;
+  private reachTimer = 0;
 
   private constructor(private readonly options: GameOptions) {
     this.renderer = new THREE.WebGLRenderer({
@@ -138,18 +169,24 @@ export class Game {
     this.forest.build(this.renderer);
     this.scene.add(this.forest.group);
 
-    await progress(80, 'Расселяем эльфов, стражу и разбойников…');
+    await progress(74, 'Ставим дворец, форт и деревянные домики…');
+    this.scene.add(buildSettlements(this.terrain, this.colliders, seed));
+
+    await progress(82, 'Расселяем эльфов, стражу и разбойников…');
     this.population = new Population(this.terrain);
     populateWorld(this.population, this.terrain, this.forest, seed);
     this.spawnMerchants();
+    this.spawnCommanders();
     this.scene.add(this.population.group);
 
     await progress(92, 'Точим оружие…');
-    this.player = new Player(SPAWN.x, SPAWN.z, this.terrain);
+    const faction = this.options.faction ?? Faction.Elves;
+    const spawn = SPAWNS[faction];
+    this.player = new Player(spawn.x, spawn.z, this.terrain);
     this.player.yaw = Math.PI * 0.15;
-    this.player.faction = Faction.Elves;
-    this.player.characterName = 'Безымянный';
-    this.reputation = new Reputation(this.player.faction);
+    this.player.faction = faction;
+    this.player.characterName = this.options.characterName ?? FACTIONS[faction].member;
+    this.reputation = new Reputation(faction);
     this.giveStartingKit();
 
     this.combat = new CombatSystem(this.terrain, this.blood, this.handleCombatEvent);
@@ -161,10 +198,15 @@ export class Game {
     // Первый обоз выходит сразу, чтобы дорога не была пустой на старте.
     this.caravans.spawnCaravan();
 
+    this.raids = new RaidSystem(this.population, this.terrain, seed, (message) =>
+      this.hud.log(message, 'bad'),
+    );
+
     this.targets = { actors: this.population.actors, player: this.player };
     this.aiWorld = {
       terrain: this.terrain,
       forest: this.forest,
+      colliders: this.colliders,
       actors: this.population.actors,
       player: this.player,
       combat: this.combat,
@@ -194,17 +236,62 @@ export class Game {
     }
   }
 
+  /** У каждой стороны своя справа: эльф с луком, стражник в кольчуге, злодей с топором. */
+  /** Командиры, у которых берут приказы. Злодею командир не нужен. */
+  private spawnCommanders(): void {
+    const commanders: { siteId: string; faction: Faction; name: string }[] = [
+      { siteId: 'barracks', faction: Faction.Palace, name: 'командир стражи' },
+      { siteId: 'partisan-camp', faction: Faction.Elves, name: 'старший партизан' },
+    ];
+
+    for (const entry of commanders) {
+      const site = getSite(entry.siteId);
+      const commander = this.population.spawn({
+        faction: entry.faction,
+        x: site.x - 5,
+        z: site.z - 5,
+        role: 'commander',
+        name: entry.name,
+        weapon: 'sword',
+        armor: entry.faction === Faction.Palace ? 'mail' : 'leather',
+        gold: 120,
+        toughness: 1.4,
+        commandsFaction: entry.faction,
+      });
+      commander.homeRadius = 4;
+    }
+  }
+
   private giveStartingKit(): void {
     const inventory = this.player.inventory;
-    inventory.add('sword');
-    inventory.add('bow');
-    inventory.add('leather');
     inventory.add('bandage', 4);
     inventory.add('salve', 1);
-    inventory.add('arrow', 24);
-    inventory.equippedWeapon = 'sword';
-    inventory.equippedArmor = 'leather';
-    inventory.gold = 65;
+
+    switch (this.player.faction) {
+      case Faction.Palace:
+        inventory.add('sword');
+        inventory.add('mail');
+        inventory.equippedWeapon = 'sword';
+        inventory.equippedArmor = 'mail';
+        inventory.gold = 80;
+        break;
+      case Faction.Villain:
+        inventory.add('axe');
+        inventory.add('leather');
+        inventory.equippedWeapon = 'axe';
+        inventory.equippedArmor = 'leather';
+        // Злодею нужны деньги: без них банду не наберёшь.
+        inventory.gold = 220;
+        break;
+      default:
+        inventory.add('bow');
+        inventory.add('dagger');
+        inventory.add('leather');
+        inventory.add('arrow', 30);
+        inventory.equippedWeapon = 'bow';
+        inventory.equippedArmor = 'leather';
+        inventory.gold = 55;
+    }
   }
 
   private createLockOverlay(): HTMLDivElement {
@@ -308,7 +395,10 @@ export class Game {
 
     this.population.update(dt, this.aiWorld, this.player.position);
     this.caravans.update(dt);
+    this.raids.update(dt);
     this.economy.update(dt);
+    this.updateSquad(dt);
+    this.updateReachedSites(dt);
     this.combat.update(dt, this.targets);
     this.blood.update(dt, (x, z) => this.terrain.heightAt(x, z));
 
@@ -336,6 +426,10 @@ export class Game {
     }
 
     if (this.input.justPressed('Tab')) this.openBag();
+    if (this.input.justPressed('KeyQ')) this.handleOrderKey();
+    if (this.input.justPressed('KeyF')) this.setSquadOrder('follow');
+    if (this.input.justPressed('KeyH')) this.setSquadOrder('hold');
+    if (this.input.justPressed('KeyG')) this.setSquadOrder('attack');
     if (this.input.mouseJustPressed(0)) this.attack();
     if (this.input.justPressed('KeyR')) this.bandage();
     if (this.input.justPressed('KeyE')) this.interact();
@@ -390,7 +484,196 @@ export class Game {
       this.plunderCaravan(target.caravan);
       return;
     }
+    if (target.kind === 'commander') {
+      this.talkToCommander(target.actor);
+      return;
+    }
+    if (target.kind === 'recruit') {
+      this.recruit(target.actor);
+      return;
+    }
     this.openTrade(target.market);
+  }
+
+  /**
+   * Клавиша приказа.
+   * Злодей берёт приказ сам — на то он и сам себе командир. Остальным нужен
+   * живой командир, поэтому им она только напоминает, что делать.
+   */
+  private handleOrderKey(): void {
+    if (this.quests.hasActive || this.quests.active?.done) {
+      this.hud.log(this.quests.describe() ?? 'Приказов нет', 'plain');
+      return;
+    }
+    if (this.player.faction === Faction.Villain) {
+      this.takeOrder();
+      return;
+    }
+    this.hud.log('Приказ можно получить только у командира', 'plain');
+  }
+
+  // ── Приказы ────────────────────────────────────────────────────────────────
+
+  /**
+   * Разговор с командиром: сдать выполненный приказ и получить следующий.
+   * За стражу дворца это единственный источник приказов — на то она и служба.
+   */
+  private talkToCommander(commander: Actor): void {
+    if (commander.commandsFaction !== this.player.faction) {
+      this.hud.log(`${commander.name} не станет с вами разговаривать`, 'bad');
+      return;
+    }
+
+    if (this.quests.active?.done) {
+      this.completeOrder();
+      return;
+    }
+    if (this.quests.hasActive) {
+      this.hud.log(`${commander.name}: «${this.quests.describe()}»`, 'plain');
+      return;
+    }
+    this.takeOrder();
+  }
+
+  /** Взять новый приказ. Злодей делает это сам, без командира. */
+  takeOrder(): void {
+    const order = this.quests.offer(this.player.faction, this.questRng);
+    if (!order) {
+      this.hud.log('Приказов нет', 'plain');
+      return;
+    }
+    this.hud.log(`Приказ: ${order.title}`, 'good');
+    this.hud.log(`«${order.brief}»`, 'plain');
+  }
+
+  /** Сдать выполненный приказ и получить награду. */
+  private completeOrder(): void {
+    const order = this.quests.claim();
+    if (!order) return;
+
+    this.player.inventory.gold += order.gold;
+    for (const [faction, delta] of order.reputation) this.reputation.change(faction, delta);
+
+    this.hud.log(
+      order.gold > 0 ? `Приказ выполнен: ${order.title}. Награда ${order.gold} золота.` : `Приказ выполнен: ${order.title}.`,
+      'good',
+    );
+  }
+
+  // ── Отряд злодея ───────────────────────────────────────────────────────────
+
+  /**
+   * Нанять бойца.
+   *
+   * Это привилегия злодея: он сам себе командир и собирает людей за золото.
+   * Стражник подчиняется, эльф воюет вместе со своими — нанимать им некого.
+   */
+  private recruit(actor: Actor): void {
+    if (this.player.faction !== Faction.Villain) {
+      this.hud.log('Нанимать людей может только тот, кто сам себе командир', 'bad');
+      return;
+    }
+    if (this.player.inventory.gold < RECRUIT_COST) {
+      this.hud.log(`Нужно ${RECRUIT_COST} золота, чтобы его нанять`, 'bad');
+      return;
+    }
+
+    this.player.inventory.gold -= RECRUIT_COST;
+    actor.inPlayerSquad = true;
+    actor.hasEscortAnchor = true;
+    this.squad.push(actor);
+    this.quests.onRecruit();
+
+    this.hud.log(`${actor.name} пошёл за вами. В отряде ${this.squad.length}.`, 'good');
+    this.checkOrderDone();
+  }
+
+  /** Отдать приказ отряду. */
+  setSquadOrder(order: SquadOrder): void {
+    if (this.squad.length === 0) {
+      this.hud.log('Отряда нет — некому приказывать', 'plain');
+      return;
+    }
+
+    this.squadOrder = order;
+    if (order === 'attack') {
+      // «В атаку» ведёт отряд туда, куда вы смотрите.
+      const forward = this.player.getForward(new THREE.Vector3());
+      const targetX = this.player.position.x + forward.x * 26;
+      const targetZ = this.player.position.z + forward.z * 26;
+      for (const member of this.squad) member.escortAnchor.set(targetX, 0, targetZ);
+    }
+
+    const labels: Record<SquadOrder, string> = {
+      follow: 'За мной!',
+      hold: 'Держать позицию!',
+      attack: 'В атаку!',
+    };
+    this.hud.log(`${labels[order]} (${this.squad.length})`, 'good');
+  }
+
+  /** Держать отряд рядом и убирать из него павших. */
+  private updateSquad(dt: number): void {
+    void dt;
+    for (let i = this.squad.length - 1; i >= 0; i--) {
+      const member = this.squad[i];
+      if (!member.alive) {
+        member.inPlayerSquad = false;
+        this.squad.splice(i, 1);
+        continue;
+      }
+
+      if (this.squadOrder !== 'follow') continue;
+
+      // Строй за спиной: каждый занимает своё место, чтобы не толкаться.
+      const angle = (i / Math.max(1, this.squad.length)) * Math.PI * 2;
+      member.escortAnchor.set(
+        this.player.position.x + Math.cos(angle) * 3.4,
+        0,
+        this.player.position.z + Math.sin(angle) * 3.4,
+      );
+      member.hasEscortAnchor = true;
+    }
+  }
+
+  /** Отмечать приход в опорные точки — этого требуют дозорные приказы. */
+  private updateReachedSites(dt: number): void {
+    this.reachTimer -= dt;
+    if (this.reachTimer > 0) return;
+    this.reachTimer = 0.75;
+
+    const { x, z } = this.player.position;
+    let nearest: string | null = null;
+
+    for (const site of SITES) {
+      if (distance2D(x, z, site.x, site.z) < REACH_RADIUS) {
+        nearest = site.id;
+        break;
+      }
+    }
+
+    if (nearest && nearest !== this.lastReachedSite) {
+      this.lastReachedSite = nearest;
+      if (this.quests.onReach(nearest)) this.announceOrderDone();
+    } else if (!nearest) {
+      this.lastReachedSite = null;
+    }
+  }
+
+  private checkOrderDone(): void {
+    if (this.quests.active?.done) this.announceOrderDone();
+  }
+
+  private announceOrderDone(): void {
+    const order = this.quests.active;
+    if (!order) return;
+
+    // Злодей отчитывается сам себе — награда сразу.
+    if (this.player.faction === Faction.Villain) {
+      this.completeOrder();
+      return;
+    }
+    this.hud.log(`${order.title}: выполнено. Доложите командиру.`, 'good');
   }
 
   private lootCorpse(target: Actor): void {
@@ -425,6 +708,7 @@ export class Game {
 
     this.economy.registerLostCargo(caravan.toSite, loot.cargo);
     this.caravans.registerRobbery(caravan);
+    if (this.quests.onRobbery(caravan.owner)) this.announceOrderDone();
 
     // Обиделся хозяин груза; те, кто с ним враждует, наоборот, довольны.
     this.reputation.change(caravan.owner, -22);
@@ -479,6 +763,7 @@ export class Game {
 
     if (event.killed) {
       this.hud.log(`${victim.name} убит`, 'good');
+      if (event.fromPlayer && this.quests.onKill(victim.faction)) this.announceOrderDone();
     } else if (event.severed) {
       this.hud.log(`${victim.name}: ${event.message}`, 'good');
     } else if (event.damage > 0 && event.attackerName === this.player.characterName) {
@@ -499,7 +784,8 @@ export class Game {
     this.player.wounds.alive = true;
     this.player.wounds.deathCause = null;
     this.player.syncWithWounds();
-    this.player.teleport(SPAWN.x, SPAWN.z, this.terrain);
+    const spawn = SPAWNS[this.player.faction];
+    this.player.teleport(spawn.x, spawn.z, this.terrain);
     this.player.inventory.add('bandage', 2);
     this.hud.log('Вы очнулись на опушке. Кто-то вас перевязал.', 'good');
   }
@@ -513,6 +799,9 @@ export class Game {
       inventory: this.player.inventory,
       mode: this.player.mode,
       interactionHint: this.interactionHint(),
+      order: this.quests.describe(),
+      factionName: FACTIONS[this.player.faction].name,
+      squadSize: this.squad.length,
       zoneName: ZONES[zoneAt(position.x, position.z)].name,
       clock: this.sky.clockLabel,
     });
@@ -542,6 +831,35 @@ export class Game {
       }
     }
 
+    const commander = this.population.nearest(
+      x,
+      z,
+      INTERACT_RANGE + 1.4,
+      (actor) => actor.alive && actor.commandsFaction === this.player.faction,
+    );
+    if (commander) {
+      this.interaction = { kind: 'commander', actor: commander };
+      return;
+    }
+
+    // Наём доступен только злодею: он один сам себе командир.
+    if (this.player.faction === Faction.Villain) {
+      const recruit = this.population.nearest(
+        x,
+        z,
+        INTERACT_RANGE + 1.2,
+        (actor) =>
+          actor.alive &&
+          !actor.inPlayerSquad &&
+          actor.faction === Faction.Villain &&
+          (actor.role === 'bandit' || actor.role === 'patrol'),
+      );
+      if (recruit) {
+        this.interaction = { kind: 'recruit', actor: recruit };
+        return;
+      }
+    }
+
     const caravan = this.caravans.nearestPlunderable(x, z, CARAVAN_RANGE);
     if (caravan) {
       this.interaction = { kind: 'caravan', caravan };
@@ -558,6 +876,11 @@ export class Game {
 
     if (target.kind === 'corpse') return `E — обыскать (${target.actor.name})`;
     if (target.kind === 'caravan') return `E — ограбить корован (${target.caravan.describeCargo()})`;
+    if (target.kind === 'recruit') return `E — нанять за ${RECRUIT_COST} зол. (${target.actor.name})`;
+    if (target.kind === 'commander') {
+      if (this.quests.active?.done) return `E — доложить о выполнении (${target.actor.name})`;
+      return this.quests.hasActive ? `E — напомнить приказ (${target.actor.name})` : `E — получить приказ (${target.actor.name})`;
+    }
     if (!this.reputation.willTrade(target.market.owner)) return `${target.market.name}: с вами не торгуют`;
     return `E — торговать (${target.market.name})`;
   }
@@ -845,6 +1168,14 @@ export class Game {
     };
   }
 
+  /** Повернуть камеру к точке мира. */
+  debugLookAt(x: number, z: number, pitch = 0.03): void {
+    const dx = x - this.player.position.x;
+    const dz = z - this.player.position.z;
+    this.player.yaw = Math.atan2(-dx, -dz);
+    this.player.pitch = pitch;
+  }
+
   /** Полностью вылечить игрока — чтобы автотест мог довести бой до конца. */
   debugHealPlayer(): void {
     this.player.wounds.heal(300);
@@ -878,7 +1209,8 @@ export class Game {
       this.player.position.x,
       this.player.position.z,
       radius,
-      (actor) => actor.alive && actor.shopSiteId === null,
+      // Своих в отряде и торговцев пропускаем: к ним подходить незачем.
+      (actor) => actor.alive && actor.shopSiteId === null && !actor.inPlayerSquad,
     );
     if (!target) return null;
 
@@ -960,6 +1292,38 @@ export class Game {
       defenders: caravan.hasDefenders,
       plunderable: caravan.isPlunderable,
       position: { x: caravan.position.x, z: caravan.position.z },
+    };
+  }
+
+  /** Отправить набег немедленно. */
+  debugLaunchRaid(planId?: string): { plan: string; alive: number; returning: boolean }[] {
+    this.raids.launch(planId);
+    return this.raids.report();
+  }
+
+  /** Сводка по фракциям, приказам и отряду. */
+  factionReport(): Record<string, unknown> {
+    return {
+      faction: this.player.faction,
+      name: this.player.characterName,
+      order: this.quests.active
+        ? {
+            id: this.quests.active.id,
+            title: this.quests.active.title,
+            progress: this.quests.active.progress,
+            need: this.quests.active.objective.count,
+            done: this.quests.active.done,
+          }
+        : null,
+      completed: [...this.quests.completed],
+      squad: this.squad.length,
+      raids: this.raids.report(),
+      reputation: {
+        elves: this.reputation.get(Faction.Elves),
+        palace: this.reputation.get(Faction.Palace),
+        villain: this.reputation.get(Faction.Villain),
+        neutral: this.reputation.get(Faction.Neutral),
+      },
     };
   }
 

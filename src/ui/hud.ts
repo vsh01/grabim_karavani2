@@ -42,6 +42,12 @@ export interface HudState {
   interactionHint: string | null;
   zoneName: string;
   clock: string;
+  /** Текущий приказ, если он есть. */
+  order: string | null;
+  /** За кого играем. */
+  factionName: string;
+  /** Сколько бойцов идёт следом. */
+  squadSize: number;
 }
 
 export class Hud {
@@ -53,6 +59,7 @@ export class Hud {
   private readonly statusLine: HTMLElement;
   private readonly gearLine: HTMLElement;
   private readonly placeLine: HTMLElement;
+  private readonly orderLine: HTMLElement;
   private readonly hintLine: HTMLElement;
   private readonly logBox: HTMLDivElement;
   private readonly entries: LogEntry[] = [];
@@ -79,6 +86,7 @@ export class Hud {
     this.statusLine = this.require('#hud-status');
     this.gearLine = this.require('#hud-gear');
     this.placeLine = this.require('#hud-place');
+    this.orderLine = this.require('#hud-order');
     this.hintLine = this.require('#hud-hint');
     this.logBox = this.require('#hud-log') as HTMLDivElement;
   }
@@ -174,7 +182,18 @@ export class Hud {
     ].filter((value): value is string => value !== null);
     this.gearLine.textContent = parts.join('   ·   ');
 
-    this.placeLine.textContent = `${state.zoneName} · ${state.clock}`;
+    this.placeLine.textContent = `${state.factionName} · ${state.zoneName} · ${state.clock}`;
+
+    if (state.order) {
+      this.orderLine.style.display = 'block';
+      const squad = state.squadSize > 0 ? ` · отряд ${state.squadSize}` : '';
+      this.orderLine.textContent = `Приказ · ${state.order}${squad}`;
+    } else if (state.squadSize > 0) {
+      this.orderLine.style.display = 'block';
+      this.orderLine.textContent = `Отряд: ${state.squadSize} · F за мной · H стоять · G в атаку`;
+    } else {
+      this.orderLine.style.display = 'none';
+    }
 
     if (state.interactionHint) {
       this.hintLine.style.display = 'block';
@@ -211,6 +230,7 @@ const TEMPLATE = `
   <div id="hud-crosshair"></div>
 
   <div id="hud-place"></div>
+  <div id="hud-order"></div>
   <div id="hud-log"></div>
   <div id="hud-bleed"></div>
   <div id="hud-hint"></div>
@@ -241,6 +261,11 @@ const STYLES = `
   #hud-place {
     position: absolute; top: 12px; right: 16px; font: 13px/1.4 "Trebuchet MS", system-ui, sans-serif;
     color: rgba(232,226,208,0.65); text-shadow: 0 1px 3px #000; letter-spacing: 0.04em;
+  }
+  #hud-order {
+    display: none; position: absolute; top: 32px; right: 16px; max-width: 340px; text-align: right;
+    font: 13px/1.45 "Trebuchet MS", system-ui, sans-serif; color: #d9b45a;
+    text-shadow: 0 1px 3px #000; letter-spacing: 0.02em;
   }
   #hud-log {
     position: absolute; top: 54px; left: 50%; transform: translateX(-50%);

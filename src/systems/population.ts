@@ -117,7 +117,7 @@ export class Population {
         }
       }
 
-      actor.update(dt, { terrain: world.terrain, forest: world.forest, colliders: undefined });
+      actor.update(dt, { terrain: world.terrain, forest: world.forest, colliders: world.colliders });
     }
 
     this.updateLimbs(dt);

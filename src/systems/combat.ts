@@ -13,6 +13,8 @@ export interface CombatEvent {
   victimName: string;
   /** Кого задели. null — значит, пострадал игрок. */
   victim: Actor | null;
+  /** Удар нанёс игрок — по этому засчитываются приказы. */
+  fromPlayer: boolean;
   /** Пострадал игрок, а не персонаж мира. */
   victimIsPlayer: boolean;
   part: BodyPart;
@@ -149,6 +151,7 @@ export class CombatSystem {
       stats.damage * player.wounds.meleeDamageMultiplier,
       stats,
       victim.point,
+      true,
     );
   }
 
@@ -268,7 +271,15 @@ export class CombatSystem {
         continue;
       }
       if (actorHit) {
-        this.applyHit(arrow.attackerName, actorHit.actor, actorHit.part, arrow.damage, arrow.stats, actorHit.point);
+        this.applyHit(
+          arrow.attackerName,
+          actorHit.actor,
+          actorHit.part,
+          arrow.damage,
+          arrow.stats,
+          actorHit.point,
+          arrow.fromPlayer,
+        );
         this.retireArrow(arrow);
         continue;
       }
@@ -319,6 +330,7 @@ export class CombatSystem {
     damage: number,
     stats: WeaponStats,
     point: THREE.Vector3,
+    fromPlayer = false,
   ): CombatEvent {
     const report = this.damageBody(victim.wounds, part, damage, stats, victim.inventory.armorValue);
 
@@ -337,6 +349,7 @@ export class CombatSystem {
       attackerName,
       victimName: victim.name,
       victim,
+      fromPlayer,
       victimIsPlayer: false,
       part,
       damage: report.applied,
@@ -367,6 +380,7 @@ export class CombatSystem {
       attackerName,
       victimName: player.characterName,
       victim: null,
+      fromPlayer: false,
       victimIsPlayer: true,
       part,
       damage: report.applied,

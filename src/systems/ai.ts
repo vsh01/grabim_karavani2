@@ -6,12 +6,14 @@ import { Faction, baseHostility } from '../data/factions';
 import { distance2D, distanceSq2D } from '../core/math';
 import type { Terrain } from '../world/terrain';
 import type { Forest } from '../world/forest';
-import { hasLineOfSight } from './physics';
+import { hasLineOfSight, type CollisionWorld } from './physics';
 import type { CombatSystem, CombatTargets } from './combat';
 
 export interface AiWorld {
   terrain: Terrain;
   forest?: Forest;
+  /** Стены поселений: сквозь дворец не ходят. */
+  colliders?: CollisionWorld;
   actors: Actor[];
   player: Player;
   combat: CombatSystem;

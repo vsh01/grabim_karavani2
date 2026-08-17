@@ -185,9 +185,11 @@ export class Sky {
     this.sun.intensity = lerp(0.45, 2.5, this.daylight);
     this.sun.color.copy(sunColor).lerp(MOON_COLOR, moonlight);
 
-    this.hemisphere.intensity = lerp(0.38, 0.95, this.daylight);
+    // Затенённые стены не должны читаться как чёрные плиты: рассеянного света
+    // в такой картинке нужно заметно больше, чем «физически честного».
+    this.hemisphere.intensity = lerp(0.45, 1.35, this.daylight);
     this.hemisphere.color.copy(horizon).lerp(DAY_HORIZON, 0.3);
-    this.hemisphere.groundColor.setHex(0x3a4028).multiplyScalar(lerp(0.35, 1, this.daylight));
+    this.hemisphere.groundColor.setHex(0x5d6248).multiplyScalar(lerp(0.4, 1, this.daylight));
 
     this.starsMaterial.opacity = clamp01(1 - this.daylight * 1.6);
 

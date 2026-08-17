@@ -53,6 +53,8 @@ export interface ActorOptions {
   scale?: number;
   /** Для торговца: какой прилавок он держит. */
   shopSiteId?: string;
+  /** Для командира: чьи приказы он раздаёт. */
+  commandsFaction?: Faction;
 }
 
 export interface HitResult {
@@ -115,6 +117,10 @@ export class Actor {
 
   /** Торговец обслуживает этот узел — по нему берутся прилавок и цены. */
   shopSiteId: string | null = null;
+  /** Командир: у него берут и ему сдают приказы этой стороны. */
+  commandsFaction: Faction | null = null;
+  /** Боец в отряде игрока — за него отвечают приказы, а не патрульный распорядок. */
+  inPlayerSquad = false;
   /** Труп исчезает не сразу — сколько он уже лежит. */
   corpseAge = 0;
 
@@ -137,6 +143,7 @@ export class Actor {
     }
     this.inventory.gold = options.gold ?? 0;
     this.shopSiteId = options.shopSiteId ?? null;
+    this.commandsFaction = options.commandsFaction ?? null;
 
     const y = terrain.heightAt(options.x, options.z);
     this.physics = {

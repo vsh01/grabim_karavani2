@@ -2,6 +2,7 @@ import { Game } from './game';
 import { ZONES, Zone, zoneAt } from './world/zones';
 import { Faction } from './data/factions';
 import type { BodyPart } from './entities/body';
+import { StartMenu } from './ui/startMenu';
 
 /** Сид мира. Одно число — и весь ландшафт, лес и постройки те же самые. */
 const WORLD_SEED = 20260816;
@@ -34,10 +35,26 @@ async function main(): Promise<void> {
   const container = document.getElementById('app');
   if (!container) throw new Error('Не найден контейнер #app');
 
+  // Выбор судьбы до постройки мира: от него зависит и место старта, и справа.
+  // Автотесты и ссылка с ?faction=… проходят меню насквозь.
+  const requested = new URLSearchParams(location.search).get('faction');
+  const skipMenu = requested !== null;
+
+  let choice = { faction: (requested as Faction) ?? Faction.Elves, name: '' };
+  if (!skipMenu) {
+    if (bootStatus) bootStatus.textContent = 'Кем будете?';
+    const menu = new StartMenu();
+    boot?.classList.add('hidden');
+    choice = await menu.choose();
+    boot?.classList.remove('hidden');
+  }
+
   const game = await Game.create({
     seed: WORLD_SEED,
     container,
     progress: report,
+    faction: choice.faction,
+    characterName: choice.name || undefined,
   });
 
   game.start();
@@ -62,6 +79,9 @@ async function main(): Promise<void> {
       look(yaw: number, pitch = 0): void {
         game.player.yaw = yaw;
         game.player.pitch = pitch;
+      },
+      lookAt(x: number, z: number, pitch?: number): void {
+        game.debugLookAt(x, z, pitch);
       },
       setTimeOfDay(time: number): void {
         game.sky.time = time;
@@ -123,6 +143,18 @@ async function main(): Promise<void> {
       },
       closeTrade(): void {
         game.closeTrade();
+      },
+      takeOrder(): void {
+        game.takeOrder();
+      },
+      squadOrder(order: 'follow' | 'hold' | 'attack'): void {
+        game.setSquadOrder(order);
+      },
+      launchRaid(planId?: string) {
+        return game.debugLaunchRaid(planId);
+      },
+      factions() {
+        return game.factionReport();
       },
       onRoad(): boolean {
         const position = game.player.position;

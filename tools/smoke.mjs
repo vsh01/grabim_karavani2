@@ -74,7 +74,7 @@ async function main() {
 
   const { chromium } = require('playwright');
   const { server, port } = await startServer();
-  const url = `http://127.0.0.1:${port}/`;
+  const url = `http://127.0.0.1:${port}/?faction=elves`;
 
   const browser = await chromium.launch({
     headless: !headed,
@@ -128,6 +128,26 @@ async function main() {
     if (zone.title !== stats.zone) {
       failures.push(`точка съёмки ${zone.x},${zone.z} оказалась в зоне «${stats.zone}», а не «${zone.title}»`);
     }
+  }
+
+  // ── Поселения ─────────────────────────────────────────────────────────────
+  // Смотрим на каждое строение снаружи: дворец, форт, деревню и домики эльфов.
+  const PLACES = [
+    { key: 'palace', title: 'Дворец императора', x: 610, z: -320, at: [610, -230], pitch: 0.1 },
+    { key: 'fort', title: 'Старый форт', x: 90, z: -690, at: [90, -760], pitch: 0.06 },
+    { key: 'village', title: 'Деревня Тихий Брод', x: 40, z: 550, at: [40, 470], pitch: 0.03 },
+    { key: 'glade', title: 'Поляна эльфов', x: -510, z: 20, at: [-580, -40], pitch: 0.06 },
+  ];
+
+  for (const spot of PLACES) {
+    await page.evaluate(({ x, z, at, pitch }) => {
+      window.__game.teleport(x, z);
+      window.__game.lookAt(at[0], at[1], pitch);
+    }, spot);
+    await page.waitForTimeout(2200);
+    await page.screenshot({ path: join(outDir, `place-${spot.key}.png`) });
+    const stats = await page.evaluate(() => window.__game.stats());
+    console.log(`→ ${spot.title.padEnd(22)} вызовов ${stats.drawCalls}, треугольников ${Math.round(stats.triangles / 1000)}k`);
   }
 
   // Панорама: смотрим на лес эльфов издалека. Тут видно ровно то, ради чего
@@ -224,8 +244,10 @@ async function main() {
   if (!crippled.bleeding) failures.push('отрубленная нога не кровоточит');
 
   // Перевязка должна спасти. Одна повязка закрывает одну рану, поэтому
-  // перевязываемся, пока кровь не остановится совсем.
-  for (let i = 0; i < 4; i++) {
+  // перевязываемся, пока кровь не остановится совсем. Бинты выдаём отдельно:
+  // проверяем механику перевязки, а не запасы в мешке.
+  await page.evaluate(() => window.__game.give('bandage', 6));
+  for (let i = 0; i < 5; i++) {
     await page.evaluate(() => window.__game.bandage());
     await page.waitForTimeout(200);
   }
@@ -323,6 +345,73 @@ async function main() {
 
   await page.evaluate(() => window.__game.closeTrade());
   await page.waitForTimeout(300);
+
+  // ── Три судьбы ────────────────────────────────────────────────────────────
+  // Играем за эльфов: приказ берём у старшего партизана в лагере.
+  await page.evaluate(() => {
+    window.__game.healPlayer();
+    window.__game.teleport(-330, -290);
+  });
+  await page.waitForTimeout(1800);
+
+  // Подходим к командиру вплотную и берём приказ.
+  const orderTaken = await page.evaluate(() => {
+    window.__game.takeOrder();
+    return window.__game.factions();
+  });
+  console.log(
+    orderTaken.order
+      ? `→ приказ получен: «${orderTaken.order.title}» (нужно ${orderTaken.order.need})`
+      : '→ приказ получить не удалось',
+  );
+  if (!orderTaken.order) failures.push('приказ не выдался');
+
+  await page.screenshot({ path: join(outDir, 'orders.png') });
+
+  // Набег: стороны воюют между собой и без участия игрока.
+  const raid = await page.evaluate(() => window.__game.launchRaid('palace-on-elves'));
+  await page.waitForTimeout(1500);
+  console.log(`→ набеги в пути: ${raid.map((entry) => `${entry.plan} (${entry.alive})`).join(', ') || 'нет'}`);
+  if (raid.length === 0) failures.push('набег не вышел');
+
+  // Отряд злодея: проверяем в отдельной вкладке, играя за злодея.
+  const villainPage = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  villainPage.on('pageerror', (error) => errors.push('злодей: ' + String(error)));
+  await villainPage.goto(`http://127.0.0.1:${port}/?faction=villain`, { waitUntil: 'domcontentloaded' });
+  await villainPage.waitForFunction(() => window.__game?.ready === true, null, { timeout: 180000 });
+  await villainPage.evaluate(() => {
+    const overlay = document.getElementById('lock-overlay');
+    if (overlay) overlay.style.display = 'none';
+  });
+  await villainPage.waitForTimeout(1500);
+
+  const villain = await villainPage.evaluate(() => {
+    // Сам себе командир: приказ берётся без всякого начальства.
+    window.__game.takeOrder();
+    // Золото на наём: проверяем сбор отряда, а не накопления.
+    window.__game.give('bandage', 1);
+    // Нанимаем всех, до кого дотягиваемся в форте.
+    for (let i = 0; i < 6; i++) {
+      window.__game.approachNearest('torso', 60);
+      window.__game.loot();
+    }
+    window.__game.squadOrder('follow');
+    return window.__game.factions();
+  });
+  await villainPage.waitForTimeout(1200);
+  await villainPage.screenshot({ path: join(outDir, 'villain-squad.png') });
+
+  // Приказ «собрать людей» злодей закрывает сам, как только отряд набран, —
+  // поэтому в сводке он может быть уже не в активных, а в выполненных.
+  const villainOrder = villain.order?.title ?? (villain.completed.length > 0 ? villain.completed[0] : null);
+  console.log(
+    `→ за злодея: приказ «${villainOrder ?? 'нет'}», отряд ${villain.squad}, ` +
+      `выполнено приказов ${villain.completed.length}, репутация в горах ${villain.reputation.villain}`,
+  );
+  if (!villainOrder) failures.push('злодей не смог взять приказ сам себе');
+  if (villain.squad === 0) failures.push('злодей никого не нанял');
+
+  await villainPage.close();
 
   // Ночной кадр — заодно проверяем, что смена суток не роняет шейдеры.
   await page.evaluate(() => {
